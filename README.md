@@ -13,18 +13,20 @@ The D1 database (`sparetime`) already exists with its tables, and its id is in `
 Push-notification keys are created automatically the first time the app runs, so there are no secrets to set.
 
 **Automatic (recommended):** Cloudflare dashboard → **Workers & Pages → Create → Import a repository** → pick this repo.
-Keep the Worker name `sparetime`, leave the build command empty, deploy command `npx wrangler deploy`.
-Every push to `main` then redeploys on its own.
+Keep the Worker name `sparetime` and set:
+
+- **Build command:** `npm run migrate` — applies any new database migrations
+- **Deploy command:** `npx wrangler deploy`
+
+Every push to `main` then migrates the database (only new migrations run) and redeploys on its own.
 
 **From your computer instead:**
 
 ```bash
 npm install
 npx wrangler login
-npm run deploy
+npm run deploy        # applies new migrations, then deploys
 ```
-
-New database migrations (a new file in `migrations/`) are applied with `npm run db:remote`.
 
 ## First run
 
@@ -58,6 +60,11 @@ Times are stored as wall-clock values in the `TIMEZONE` var (America/Denver).
 Setup seeds categories you can rename or delete: Umpiring, Bowling, Ada County USBC (first person); Bowling, Gutter Gussie (second); Date night, Family (shared).
 
 Everything fits Cloudflare's free plan: Workers (100k requests/day), D1 (5 GB), Cron Triggers.
+
+## Search engines
+
+The app sends `X-Robots-Tag: noindex` on every response and has a `noindex` meta tag, so Google won't list it.
+`robots.txt` deliberately allows crawling — blocking it would stop Google from seeing the noindex.
 
 ## Local development
 

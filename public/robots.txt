@@ -1,0 +1,4 @@
+# SpareTime is a private app. Crawling is allowed only so search engines can see the
+# noindex header/tag and drop the page; blocking here would stop them from seeing it.
+User-agent: *
+Allow: /

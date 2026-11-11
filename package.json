@@ -3,10 +3,11 @@
   "version": "1.0.0",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler d1 migrations apply sparetime --remote && wrangler deploy",
     "vapid": "node scripts/vapid.mjs",
     "db:local": "wrangler d1 migrations apply sparetime --local",
-    "db:remote": "wrangler d1 migrations apply sparetime --remote"
+    "db:remote": "wrangler d1 migrations apply sparetime --remote",
+    "migrate": "wrangler d1 migrations apply sparetime --remote"
   },
   "devDependencies": {
     "wrangler": "^4.160.1"
