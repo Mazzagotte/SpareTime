@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sparetime",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  // The app lives at your own address. Deploy creates the DNS record + certificate automatically
+  // (mazzagotte.dev must be a zone in this Cloudflare account).
+  "routes": [{ "pattern": "sparetime.mazzagotte.dev", "custom_domain": true }],
+  // Only one address, so the home-screen app and notifications never split across two.
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sparetime",
+      "database_id": "6eb77ed3-bf35-4fcd-83c7-379940f88eac",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Every 5 minutes: reminders, weather alerts (6 PM) and the Sunday recap (7 PM).
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "vars": {
+    "TIMEZONE": "America/Denver",
+    "HOME_NAME": "Boise",
+    "HOME_LAT": "43.6150",
+    "HOME_LON": "-116.2023",
+    // Contact push services can use about this app (a URL or mailto:).
+    "VAPID_SUBJECT": "https://sparetime.mazzagotte.dev"
+  }
+  // Push notification keys are created automatically on first run and kept in the database.
+  // (Optional override: secrets VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY from `npm run vapid`.)
+}
