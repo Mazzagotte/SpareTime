@@ -109,6 +109,9 @@ img { display: block; }
 .day.today .n { background: var(--blue-bg); color: var(--blue-fg); font-weight: 700; }
 .day.sel .n { background: var(--sel-bg); color: var(--sel-fg); font-weight: 700; }
 .bar { display: block; height: 14px; line-height: 14px; padding: 0 3px; border-radius: 4px; font-size: 10px; font-weight: 600; color: #FFFFFF; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.bar.holiday { background: var(--surface2); color: var(--sub); }
+.holiday-row { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 12px; background: var(--surface2); color: var(--sub); font-size: 13px; }
+.holiday-row b { color: var(--text); font-weight: 700; }
 .more { font-size: 10px; font-weight: 600; color: var(--sub); text-align: center; line-height: 12px; }
 
 /* agenda */

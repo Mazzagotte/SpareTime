@@ -1,5 +1,6 @@
 // SpareTime front end — a small single-page app, no build step.
 import { parseQuick } from './quickadd.js';
+import { holidaysBetween } from './holidays.js';
 
 const $app = document.getElementById('app');
 const $overlay = document.getElementById('overlay');
@@ -8,6 +9,7 @@ const $toast = document.getElementById('toast');
 const S = {
   loaded: false, setup_needed: false, me: null, people: [], partner: null, today: '', vapid: null, home: '',
   cats: [], unread: 0, filter: localStorage.getItem('st-filter') || 'both',
+  holidays: localStorage.getItem('st-holidays') || 'all', // all | federal | off
   monthSel: null, monthCache: null, agendaFrom: null, base: '#/month', sheetPushed: false,
 };
 
@@ -72,6 +74,7 @@ const I = {
   import: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>',
   check: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
   share: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="m16 6-4-4-4 4"/><path d="M12 2v13"/></svg>',
+  flag: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 22V4"/><path d="M4 4h13l-2 4 2 4H4"/></svg>',
   car: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 17h14v-5l-2-5H7l-2 5z"/><circle cx="7.5" cy="17.5" r="1.5"/><circle cx="16.5" cy="17.5" r="1.5"/></svg>',
   wx: {
     sun: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
@@ -114,6 +117,10 @@ function toast(msg, { action, onAction, ms = 3200 } = {}) {
   toastTimer = setTimeout(() => $toast.classList.remove('show'), ms);
 }
 const fail = (e) => toast(e.message || 'Something went wrong');
+
+function holidayRows(list) {
+  return (list || []).map((h) => `<div class="holiday-row">${I.flag}<span><b>${esc(h.name)}</b>${h.federal ? ' · Federal holiday' : ''}</span></div>`).join('');
+}
 
 function on(root, sel, evt, fn) {
   root.querySelectorAll(sel).forEach((el) => el.addEventListener(evt, (e) => fn(e, el)));
@@ -161,8 +168,8 @@ async function loadState() {
   S.vapid = st.vapid_public;
   S.home = st.home;
   if (S.me) {
-    S.cats = await api('/categories');
-    refreshUnread();
+    const [cats] = await Promise.all([api('/categories'), refreshUnread()]);
+    S.cats = cats;
     syncPush();
   }
 }
@@ -339,15 +346,19 @@ function renderMonth(sel, start, weeks, all, loading) {
   const month = sel.slice(0, 7);
   const byDay = {};
   for (const e of events) (byDay[e.occ_date] ||= []).push(e);
+  const hol = holidaysBetween(start, addDays(start, weeks * 7 - 1), S.holidays);
   const yr = sel.slice(0, 4) !== S.today.slice(0, 4) ? ` ${sel.slice(0, 4)}` : '';
   let cells = '';
   for (let i = 0; i < weeks * 7; i++) {
     const d = addDays(start, i);
     const evs = byDay[d] || [];
     const cls = ['day', d.slice(0, 7) !== month && 'out', d === S.today && 'today', d === sel && 'sel'].filter(Boolean).join(' ');
-    const bars = evs.slice(0, 2).map((e) => `<span class="bar" style="background:${esc(e.category.color)}">${esc(e.masked ? 'Busy' : e.title)}</span>`).join('');
-    const more = evs.length > 2 ? `<span class="more">+${evs.length - 2}</span>` : '';
-    cells += `<button class="${cls}" data-date="${d}" aria-label="${prettyDate(d, true)}, ${evs.length} event${evs.length === 1 ? '' : 's'}${d === S.today ? ', today' : ''}"><span class="n">${Number(d.slice(8))}</span>${bars}${more}</button>`;
+    const h = hol[d] || [];
+    const room = h.length ? 1 : 2;
+    const bars = (h.length ? `<span class="bar holiday">${esc(h[0].name.replace(' (observed)', ''))}</span>` : '')
+      + evs.slice(0, room).map((e) => `<span class="bar" style="background:${esc(e.category.color)}">${esc(e.masked ? 'Busy' : e.title)}</span>`).join('');
+    const more = evs.length > room ? `<span class="more">+${evs.length - room}</span>` : '';
+    cells += `<button class="${cls}" data-date="${d}" aria-label="${prettyDate(d, true)}${h.length ? ', ' + esc(h.map((x) => x.name).join(', ')) : ''}, ${evs.length} event${evs.length === 1 ? '' : 's'}${d === S.today ? ', today' : ''}"><span class="n">${Number(d.slice(8))}</span>${bars}${more}</button>`;
   }
   const dayEvents = byDay[sel] || [];
   const owners = new Set(dayEvents.filter((e) => e.owner_id != null).map((e) => e.owner_id));
@@ -365,6 +376,7 @@ function renderMonth(sel, start, weeks, all, loading) {
     </section>
     <section class="section" style="margin-top:4px">
       <div class="section-head"><h2 style="font-size:19px;font-weight:700">${prettyDate(sel, true).replace(/^(\w+), (\w+)/, (m, a, b) => `${a}, ${b.slice(0, 3)}`)}</h2><span class="muted">${dayEvents.length === 1 ? '1 event' : `${dayEvents.length} events`}</span></div>
+      ${holidayRows(hol[sel])}
       ${both ? `<div class="banner warn">${I.users}You're both booked this day</div>` : ''}
       ${dayEvents.map((e) => evCard(e)).join('')}
       ${!dayEvents.length && !loading ? `<div class="empty">Nothing on the calendar.<a class="btn small" href="#/add?date=${sel}">${I.plusSm} Add something</a></div>` : ''}
@@ -418,6 +430,7 @@ async function viewAgenda() {
   const start = S.agendaFrom && S.agendaFrom >= from ? S.agendaFrom : from;
   const byDay = {};
   for (const e of events) (byDay[e.occ_date] ||= []).push(e);
+  const hol = holidaysBetween(from, to, S.holidays);
 
   const upcoming = events.filter((e) => !e.masked && (e.occ_date > from || (!e.all_day && e.start_time)));
   const big = upcoming.find((e) => /tourn|tourney|game|ump/i.test(e.title) && e.occ_date > from) || null;
@@ -439,11 +452,11 @@ async function viewAgenda() {
   let groups = '';
   for (let i = 0; i < 14; i++) {
     const d = addDays(start, i);
-    const evs = byDay[d];
-    if (!evs) continue;
+    const evs = byDay[d] || [];
+    if (!evs.length && !hol[d]) continue;
     const owners = new Set(evs.filter((e) => e.owner_id != null).map((e) => e.owner_id));
     const both = S.partner && owners.has(S.me.id) && owners.has(S.partner.id);
-    groups += `<section class="section"><div class="section-head"><h2 class="h2">${daysBetween(S.today, d) <= 1 && daysBetween(S.today, d) >= 0 ? relDay(d) + ' · ' : ''}${prettyDate(d)}</h2>${both ? '<span class="tag">Both booked</span>' : ''}</div>${evs.map((e) => evCard(e, { showTime: true })).join('')}</section>`;
+    groups += `<section class="section"><div class="section-head"><h2 class="h2">${daysBetween(S.today, d) <= 1 && daysBetween(S.today, d) >= 0 ? relDay(d) + ' · ' : ''}${prettyDate(d)}</h2>${both ? '<span class="tag">Both booked</span>' : ''}</div>${holidayRows(hol[d])}${evs.map((e) => evCard(e, { showTime: true })).join('')}</section>`;
   }
 
   setScreen(`<main class="screen">
@@ -901,6 +914,8 @@ async function viewActivity() {
     ${Object.entries(groups).filter(([, l]) => l.length).map(([k, l]) => `<section class="section"><h2 class="h2">${k}</h2><div class="card rows">${l.map(item).join('')}</div></section>`).join('') || `<div class="empty">Nothing yet. When ${esc(other || 'someone')} adds plans or sends a message, it shows up here.</div>`}
     <section class="section"><h2 class="h2">Notify me when</h2><div class="card rows">${prefRows.map(([k, l]) => toggleRow('pref-' + k, l, a.prefs[k])).join('')}</div></section>
     <section class="section"><h2 class="h2">Settings</h2><div class="card rows">
+      <div class="row" style="flex-wrap:wrap;gap:10px"><span class="grow"><span class="t" id="hol-l">U.S. holidays</span><span class="s">Shown on this phone's calendar</span></span>
+        <div class="seg" role="group" aria-labelledby="hol-l" style="width:100%">${[['all', 'All'], ['federal', 'Federal only'], ['off', 'Off']].map(([k, l]) => `<button data-hol="${k}" aria-pressed="${S.holidays === k}">${l}</button>`).join('')}</div></div>
       <a class="row" href="#/categories"><span class="grow"><span class="t">Categories</span><span class="s">Add, remove or recolor yours</span></span>${I.right}</a>
       <button class="row" id="pw-btn" style="border:0;background:none;width:100%;text-align:left"><span class="grow"><span class="t">Change password</span></span>${I.right}</button>
       <button class="row" id="signout" style="border:0;background:none;width:100%;text-align:left;color:var(--danger)"><span class="grow"><span class="t">Sign out</span></span></button>
@@ -908,6 +923,12 @@ async function viewActivity() {
   </main>${navHtml('activity')}`);
 
   for (const [k] of prefRows) bindToggle('pref-' + k, (v) => api('/prefs', { method: 'PUT', body: { [k]: v } }));
+  on($app, '[data-hol]', 'click', (e, el) => {
+    S.holidays = el.dataset.hol;
+    localStorage.setItem('st-holidays', S.holidays);
+    $app.querySelectorAll('[data-hol]').forEach((b) => b.setAttribute('aria-pressed', String(b === el)));
+    toast(S.holidays === 'off' ? 'Holidays hidden' : S.holidays === 'federal' ? 'Showing federal holidays' : 'Showing all holidays');
+  });
   $app.querySelector('#signout').addEventListener('click', async () => {
     await api('/logout', { method: 'POST' }).catch(() => {});
     S.me = null; S.loaded = false; location.hash = '';
@@ -1032,9 +1053,10 @@ async function viewCategories() {
 // ---------------------------------------------------------------- free together
 async function viewFree(filter = 'any') {
   const slots = await api('/free?days=21');
+  const hol = holidaysBetween(S.today, addDays(S.today, 21), S.holidays);
   const shown = slots.filter((s) => filter === 'any' || (filter === 'wk' ? s.weekend : !s.weekend));
   const title = (s) => (s.kind === 'day' ? `All day ${DOW[dow(s.date)]}` : s.date === S.today ? 'Tonight' : `${DOW[dow(s.date)]} evening`);
-  const meta = (s) => (s.kind === 'day' ? 'Nothing scheduled' : `Free after ${prettyTime(s.after)}`) + (s.weather ? ` · ${s.weather.text}, ${s.weather.high}°` : '');
+  const meta = (s) => (hol[s.date] ? `${hol[s.date][0].name.replace(' (observed)', '')} · ` : '') + (s.kind === 'day' ? 'Nothing scheduled' : `Free after ${prettyTime(s.after)}`) + (s.weather ? ` · ${s.weather.text}, ${s.weather.high}°` : '');
   setScreen(`<main class="screen no-nav">
     <div class="topbar"><a class="textbtn" href="#/agenda">${I.left}Coming up</a></div>
     <div><h1 class="title">Free together</h1><p class="muted" style="font-size:14px;margin-top:4px">Times in the next 3 weeks when neither of you has anything planned.</p></div>

@@ -1,6 +1,6 @@
 // SpareTime service worker: offline app shell + push notifications.
-const VERSION = 'st-v1';
-const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/quickadd.js', '/manifest.webmanifest',
+const VERSION = 'st-v2';
+const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/quickadd.js', '/holidays.js', '/manifest.webmanifest',
   '/icons/icon-192.png', '/icons/mark.png', '/icons/badge-96.png', '/icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
