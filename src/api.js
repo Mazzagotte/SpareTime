@@ -149,6 +149,27 @@ async function setKinds(env, eventId, userId, kinds) {
   ).bind(eventId, userId, JSON.stringify(cleanKinds(kinds))).run();
 }
 
+async function categoryDefaults(env, userId, categoryId) {
+  if (!categoryId) return null;
+  const r = await env.DB.prepare('SELECT kinds FROM category_reminders WHERE user_id = ? AND category_id = ?').bind(userId, categoryId).first();
+  return r ? safeJson(r.kinds, null) : null;
+}
+
+const TEMP_WORDS = ['strike', 'spare', 'lane', 'pin', 'frame', 'split', 'hook', 'gutter', 'ball', 'tenpin', 'double', 'turkey'];
+function tempPassword() {
+  const r = crypto.getRandomValues(new Uint32Array(3));
+  return `${TEMP_WORDS[r[0] % TEMP_WORDS.length]}-${TEMP_WORDS[r[1] % TEMP_WORDS.length]}-${100 + (r[2] % 900)}`;
+}
+
+// Moves reactions/statuses for occurrences on or after `fromDate` (or exactly `onlyDate`) to another event, shifting dates by `shift` days.
+async function moveOccurrenceData(env, fromId, toId, { onlyDate = null, fromDate = null, shift = 0 }) {
+  for (const table of ['reactions', 'statuses']) {
+    const where = onlyDate ? 'occ_date = ?' : 'occ_date >= ?';
+    await env.DB.prepare(`UPDATE OR IGNORE ${table} SET event_id = ?, occ_date = date(occ_date, ?) WHERE event_id = ? AND ${where}`)
+      .bind(toId, `${shift >= 0 ? '+' : ''}${shift} days`, fromId, onlyDate || fromDate).run();
+  }
+}
+
 async function getKinds(env, eventId, userId) {
   const r = await env.DB.prepare('SELECT kinds FROM event_reminders WHERE event_id = ? AND user_id = ?').bind(eventId, userId).first();
   return r ? safeJson(r.kinds, []) : [];
@@ -259,8 +280,21 @@ export async function handleApi(request, env, ctx) {
   if (path === '/state' && method === 'GET') {
     const ppl = await people(env);
     const me = ppl.length ? await currentUser(env, request) : null;
+    let health = null;
+    if (me) {
+      const { results: cfg } = await env.DB.prepare("SELECT key, value FROM config WHERE key IN ('cron_last', 'cron_error')").all();
+      const c = Object.fromEntries(cfg.map((x) => [x.key, x.value]));
+      const first = await env.DB.prepare('SELECT MIN(created_at) AS t FROM users').first();
+      const since = c.cron_last ? Number(c.cron_last) : Date.parse((first.t || '').replace(' ', 'T') + 'Z');
+      const err = c.cron_error ? safeJson(c.cron_error, null) : null;
+      health = {
+        stale: Number.isFinite(since) && Date.now() - since > 30 * 60000,
+        error: err && Date.now() - err.at < 24 * 3600000 ? err.message : null,
+      };
+    }
     return json({
       setup_needed: ppl.length === 0,
+      health,
       me,
       people: ppl,
       vapid_public: ppl.length ? (await vapidKeys(env)).pub : null,
@@ -333,15 +367,63 @@ export async function handleApi(request, env, ctx) {
     return json({ ok: true });
   }
 
+  // Live updates: the app polls this; `rev` changes whenever either person changes something.
+  if (path === '/rev' && method === 'GET') {
+    const [rev, unread] = await Promise.all([
+      env.DB.prepare("SELECT value FROM config WHERE key = 'rev'").first(),
+      env.DB.prepare('SELECT COUNT(*) AS n FROM activity WHERE user_id = ? AND read_at IS NULL').bind(me.id).first(),
+    ]);
+    return json({ rev: rev ? rev.value : '0', unread: unread.n });
+  }
+
+  // Forgot password: either person can give the other a temporary password.
+  if (path === '/partner/reset-password' && method === 'POST') {
+    if (!partner) throw new HttpError(400, 'No one else to reset');
+    const pw = tempPassword();
+    const { hash, salt } = await hashPassword(pw);
+    await env.DB.batch([
+      env.DB.prepare('UPDATE users SET pass_hash = ?, pass_salt = ? WHERE id = ?').bind(hash, salt, partner.id),
+      env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(partner.id),
+    ]);
+    await notify(env, ctx, { to: partner.id, kind: 'password', actorId: me.id, lead: `${me.name} reset your password`, body: 'Sign in with the temporary password they gave you, then change it under Activity → Settings.', feed: true });
+    return json({ password: pw, name: partner.name });
+  }
+
+  // Backup: everything you can see, as a JSON file.
+  if (path === '/export' && method === 'GET') {
+    const [events, cats, rems] = await Promise.all([
+      env.DB.prepare('SELECT * FROM events ORDER BY date').all(),
+      env.DB.prepare('SELECT id, owner_id, name, color, deleted_at FROM categories').all(),
+      env.DB.prepare('SELECT * FROM event_reminders').all(),
+    ]);
+    const visible = events.results.filter((ev) => !isHidden(ev, me));
+    const ids = new Set(visible.map((ev) => ev.id));
+    const body = JSON.stringify({
+      app: 'SpareTime', version: 1, exported_at: new Date().toISOString(), exported_by: me.name,
+      people: ppl.map((p) => ({ id: p.id, name: p.name })),
+      categories: cats.results,
+      events: visible,
+      reminders: rems.results.filter((r) => ids.has(r.event_id)),
+    }, null, 2);
+    return new Response(body, { headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'content-disposition': `attachment; filename="sparetime-backup-${todayLocal(env.TIMEZONE)}.json"`,
+      'cache-control': 'no-store', 'x-robots-tag': 'noindex, nofollow',
+    } });
+  }
+
   // Categories
   if (path === '/categories' && method === 'GET') {
     const { results } = await env.DB.prepare(
       `SELECT c.*, (SELECT COUNT(*) FROM events e WHERE e.category_id = c.id) AS events
        FROM categories c WHERE c.deleted_at IS NULL ORDER BY c.sort, c.id`
     ).all();
+    const { results: defs } = await env.DB.prepare('SELECT category_id, kinds FROM category_reminders WHERE user_id = ?').bind(me.id).all();
+    const defMap = new Map(defs.map((d) => [d.category_id, safeJson(d.kinds, null)]));
     return json(results.map((c) => ({
       id: c.id, owner_id: c.owner_id, name: c.name, color: c.color, outdoor: !!c.outdoor, events: c.events,
       can_edit: c.owner_id == null || c.owner_id === me.id,
+      my_reminders: defMap.has(c.id) ? defMap.get(c.id) : null,
     })));
   }
   if (path === '/categories' && method === 'POST') {
@@ -353,6 +435,21 @@ export async function handleApi(request, env, ctx) {
       .bind(b.shared ? null : me.id, name, color, b.outdoor ? 1 : 0).run();
     return json({ id: r.meta.last_row_id });
   }
+  if ((m = path.match(/^\/categories\/(\d+)\/reminders$/)) && method === 'PUT') {
+    const c = await env.DB.prepare('SELECT id FROM categories WHERE id = ? AND deleted_at IS NULL').bind(Number(m[1])).first();
+    if (!c) throw new HttpError(404, 'Category not found');
+    const b = await readJson(request);
+    if (b.kinds == null) {
+      await env.DB.prepare('DELETE FROM category_reminders WHERE user_id = ? AND category_id = ?').bind(me.id, c.id).run();
+      return json({ kinds: null });
+    }
+    const kinds = cleanKinds(b.kinds);
+    await env.DB.prepare(
+      'INSERT INTO category_reminders (user_id, category_id, kinds) VALUES (?, ?, ?) ON CONFLICT (user_id, category_id) DO UPDATE SET kinds = excluded.kinds'
+    ).bind(me.id, c.id, JSON.stringify(kinds)).run();
+    return json({ kinds });
+  }
+
   if ((m = path.match(/^\/categories\/(\d+)(\/restore)?$/))) {
     const c = await env.DB.prepare('SELECT * FROM categories WHERE id = ?').bind(Number(m[1])).first();
     if (!c) throw new HttpError(404, 'Category not found');
@@ -395,14 +492,17 @@ export async function handleApi(request, env, ctx) {
     ).bind(e.owner_id, e.category_id, e.title, e.date, e.end_date, e.start_time, e.end_time, e.all_day, e.location, e.notes,
       e.repeat, e.repeat_until, e.visibility, e.notify_partner, me.id).run();
     const id = r.meta.last_row_id;
-    const kinds = cleanKinds(b.reminders || ['night']);
+    const kinds = cleanKinds(b.reminders || (await categoryDefaults(env, me.id, e.category_id)) || ['night']);
+    const partnerDefault = async () => (partner && (await categoryDefaults(env, partner.id, e.category_id))) || ['night'];
     if (e.owner_id == null) {
-      for (const p of ppl) await setKinds(env, id, p.id, kinds);
+      // Shared: your reminders are yours. The other person gets their own defaults unless you turned that off (e.g. their birthday).
+      await setKinds(env, id, me.id, kinds);
+      if (partner && b.remind_partner !== false) await setKinds(env, id, partner.id, await partnerDefault());
     } else if (e.owner_id === me.id) {
       await setKinds(env, id, me.id, kinds);
       if (partner && b.partner_night && e.visibility !== 'private') await setKinds(env, id, partner.id, ['night']);
     } else {
-      await setKinds(env, id, e.owner_id, ['night']);
+      await setKinds(env, id, e.owner_id, await partnerDefault());
     }
     const ev = await loadEvent(env, id);
     if (e.notify_partner && e.visibility !== 'private') {
@@ -457,6 +557,45 @@ export async function handleApi(request, env, ctx) {
       if (!canEdit(ev, me)) throw new HttpError(403, "You can't change this event");
       const b = await readJson(request);
       const e = await eventInput(env, b, me, ppl);
+      const occ = url.searchParams.get('date');
+      let scope = url.searchParams.get('scope');
+      if (ev.repeat === 'none' || !DATE_RE.test(occ || '') || (scope === 'future' && occ <= ev.date)) scope = 'all';
+      if (scope === 'one' || scope === 'future') {
+        // Split the series: the edited occurrence(s) become a new event, the old series skips/ends before them.
+        const shift = daysBetween(occ, e.date);
+        const newRepeat = scope === 'one' ? 'none' : e.repeat;
+        const exdates = scope === 'future' ? JSON.stringify(safeJson(ev.exdates, []).filter((d) => d >= occ).map((d) => addDays(d, shift))) : '[]';
+        const r = await env.DB.prepare(
+          `INSERT INTO events (owner_id, category_id, title, date, end_date, start_time, end_time, all_day, location, notes, repeat, repeat_until, exdates, visibility, notify_partner, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(e.owner_id, e.category_id, e.title, e.date, e.end_date, e.start_time, e.end_time, e.all_day, e.location, e.notes,
+          newRepeat, newRepeat === 'none' ? null : e.repeat_until, exdates, e.visibility, e.notify_partner, ev.created_by).run();
+        const newId = r.meta.last_row_id;
+        if (scope === 'one') {
+          const ex = safeJson(ev.exdates, []);
+          if (!ex.includes(occ)) ex.push(occ);
+          await env.DB.prepare('UPDATE events SET exdates = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(JSON.stringify(ex), ev.id).run();
+          await moveOccurrenceData(env, ev.id, newId, { onlyDate: occ, shift });
+        } else {
+          await env.DB.prepare('UPDATE events SET repeat_until = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(addDays(occ, -1), ev.id).run();
+          await moveOccurrenceData(env, ev.id, newId, { fromDate: occ, shift });
+        }
+        const { results: rems } = await env.DB.prepare('SELECT user_id, kinds FROM event_reminders WHERE event_id = ?').bind(ev.id).all();
+        for (const row of rems) await setKinds(env, newId, row.user_id, row.user_id === me.id && Array.isArray(b.reminders) ? b.reminders : safeJson(row.kinds, []));
+        if (Array.isArray(b.reminders) && !rems.some((x) => x.user_id === me.id)) await setKinds(env, newId, me.id, b.reminders);
+        if (e.notify_partner && e.visibility !== 'private') {
+          for (const to of audience(ev, me, ppl)) {
+            await notify(env, ctx, {
+              to, pref: 'partner_changes', kind: 'changed', actorId: me.id, eventId: newId, occDate: e.date,
+              lead: `${me.name} changed`,
+              body: `${e.visibility === 'shared' || e.owner_id == null ? e.title : 'a busy block'} · ${scope === 'one' ? `${whenText(e.date, e.start_time, e.all_day, e.end_date)} (just that day)` : `from ${prettyDate(e.date)} on`}`,
+              url: `/#/event/${newId}/${e.date}`,
+            });
+          }
+        }
+        await checkBothBooked(env, ctx, e.date, ppl);
+        return json({ ok: true, id: newId });
+      }
       await env.DB.prepare(
         `UPDATE events SET owner_id=?, category_id=?, title=?, date=?, end_date=?, start_time=?, end_time=?, all_day=?, location=?, notes=?, repeat=?, repeat_until=?,
          visibility=?, notify_partner=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
@@ -473,14 +612,17 @@ export async function handleApi(request, env, ctx) {
         }
       }
       for (let i = 0; i <= Math.min(e.end_date ? daysBetween(e.date, e.end_date) : 0, 6); i++) await checkBothBooked(env, ctx, addDays(e.date, i), ppl);
-      return json({ ok: true });
+      return json({ ok: true, id: ev.id });
     }
 
     if (method === 'DELETE') {
       if (!canEdit(ev, me)) throw new HttpError(403, "You can't delete this event");
       const date = url.searchParams.get('date');
       const one = url.searchParams.get('scope') === 'one' && ev.repeat !== 'none' && DATE_RE.test(date || '');
-      if (one) {
+      const future = url.searchParams.get('scope') === 'future' && ev.repeat !== 'none' && DATE_RE.test(date || '') && date > ev.date;
+      if (future) {
+        await env.DB.prepare('UPDATE events SET repeat_until = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(addDays(date, -1), ev.id).run();
+      } else if (one) {
         const ex = safeJson(ev.exdates, []);
         if (!ex.includes(date)) ex.push(date);
         await env.DB.prepare('UPDATE events SET exdates = ? WHERE id = ?').bind(JSON.stringify(ex), ev.id).run();
@@ -492,7 +634,7 @@ export async function handleApi(request, env, ctx) {
           await notify(env, ctx, {
             to, pref: 'partner_changes', kind: 'removed', actorId: me.id,
             lead: `${me.name} removed`,
-            body: `${ev.visibility === 'shared' || ev.owner_id == null ? ev.title : 'a busy block'} · ${one ? prettyDate(date) : whenText(ev.date, ev.start_time, ev.all_day, ev.end_date)}${one ? ' (just that day)' : ''}`,
+            body: `${ev.visibility === 'shared' || ev.owner_id == null ? ev.title : 'a busy block'} · ${future ? `from ${prettyDate(date)} on` : one ? `${prettyDate(date)} (just that day)` : whenText(ev.date, ev.start_time, ev.all_day, ev.end_date)}`,
           });
         }
       }

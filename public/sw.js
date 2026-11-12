@@ -1,5 +1,5 @@
 // SpareTime service worker: offline app shell + push notifications.
-const VERSION = 'st-v4';
+const VERSION = 'st-v5';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/quickadd.js', '/holidays.js', '/manifest.webmanifest',
   '/icons/icon-192.png', '/icons/mark.png', '/icons/badge-96.png', '/icons/apple-touch-icon.png'];
 

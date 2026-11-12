@@ -10,6 +10,9 @@ const S = {
   loaded: false, setup_needed: false, me: null, people: [], partner: null, today: '', vapid: null, home: '',
   cats: [], unread: 0, filter: localStorage.getItem('st-filter') || 'both',
   holidays: localStorage.getItem('st-holidays') || 'all', // all | federal | off
+  weekStart: Number(localStorage.getItem('st-weekstart')) === 1 ? 1 : 0, // 0 = Sunday, 1 = Monday
+  calView: localStorage.getItem('st-calview') === 'week' ? 'week' : 'month',
+  rev: null, health: null,
   monthSel: null, monthCache: null, agendaFrom: null, base: '#/month', sheetPushed: false,
 };
 
@@ -45,6 +48,10 @@ function spanText(e) {
   return `Day ${e.day_index + 1} of ${e.span}${t}`;
 }
 const dayOf = (e) => e.day || e.occ_date;
+// Position of a date within the week, honoring the Sunday/Monday setting.
+const wpos = (d) => (dow(d) - S.weekStart + 7) % 7;
+const weekStartOf = (d) => addDays(d, -wpos(d));
+const DOW_LETTERS = () => (S.weekStart ? ['M', 'T', 'W', 'T', 'F', 'S', 'S'] : ['S', 'M', 'T', 'W', 'T', 'F', 'S']);
 function relDay(d) {
   const n = daysBetween(S.today, d);
   if (n === 0) return 'Today';
@@ -82,6 +89,7 @@ const I = {
   import: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>',
   check: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
   share: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="m16 6-4-4-4 4"/><path d="M12 2v13"/></svg>',
+  copy: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
   search: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
   flag: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 22V4"/><path d="M4 4h13l-2 4 2 4H4"/></svg>',
   car: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 17h14v-5l-2-5H7l-2 5z"/><circle cx="7.5" cy="17.5" r="1.5"/><circle cx="16.5" cy="17.5" r="1.5"/></svg>',
@@ -159,7 +167,7 @@ function evCard(e, { showTime = false } = {}) {
 function navHtml(active) {
   const tab = (key, href, icon, label) =>
     `<a href="${href}" ${active === key ? 'aria-current="page"' : ''}>${icon}${label}${key === 'activity' && S.unread && active !== 'activity' ? `<span class="badge" aria-label="${S.unread} unread">${S.unread > 9 ? '9+' : S.unread}</span>` : ''}</a>`;
-  return `<div class="navwrap"><nav class="nav" aria-label="Main">${tab('month', '#/month', I.cal, 'Month')}${tab('agenda', '#/agenda', I.list, 'Agenda')}${tab('activity', '#/activity', I.bell, 'Activity')}</nav>
+  return `<div class="navwrap"><nav class="nav" aria-label="Main">${tab('month', S.calView === 'week' ? '#/week' : '#/month', I.cal, 'Calendar')}${tab('agenda', '#/agenda', I.list, 'Agenda')}${tab('activity', '#/activity', I.bell, 'Activity')}</nav>
     <a class="fab" href="#/add" aria-label="Add event">${I.plus}</a></div>`;
 }
 
@@ -179,9 +187,11 @@ async function loadState() {
   S.today = st.today;
   S.vapid = st.vapid_public;
   S.home = st.home;
+  S.health = st.health;
   if (S.me) {
-    const [cats] = await Promise.all([api('/categories'), refreshUnread()]);
+    const [cats, rev] = await Promise.all([api('/categories'), api('/rev'), refreshUnread()]);
     S.cats = cats;
+    S.rev = rev.rev;
     syncPush();
   }
 }
@@ -225,6 +235,7 @@ async function renderBase(hash) {
     case 'categories': return viewCategories();
     case 'free': return viewFree();
     case 'search': return viewSearch();
+    case 'week': return viewWeek(isDate(a) ? a : null);
     default: return viewMonth(isDate(a) ? a : null);
   }
 }
@@ -233,9 +244,28 @@ window.addEventListener('hashchange', () => { S.hops = (S.hops || 0) + 1; route(
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && S.me) {
     refreshUnread();
+    S.monthCache = null; S.weekCache = null;
     if (/^#\/(month|agenda|activity)?/.test(location.hash) && !$overlay.innerHTML) route();
   }
 });
+
+// Live updates: every 15 seconds while the app is on screen, check whether anything changed.
+async function pollChanges() {
+  if (!S.me || document.visibilityState !== 'visible') return;
+  try {
+    const r = await api('/rev');
+    const changed = S.rev !== null && r.rev !== S.rev;
+    S.rev = r.rev;
+    if (r.unread !== S.unread) { S.unread = r.unread; refreshUnread(); }
+    if (!changed) return;
+    S.monthCache = null; S.weekCache = null;
+    const busy = $overlay.innerHTML || document.querySelector('.dialog') || (document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName));
+    if (!busy && /^#\/(month|week|agenda|activity|event|free)?/.test(location.hash || '#/month') && !/^#\/search/.test(location.hash)) {
+      await renderBase(location.hash || '#/month');
+    }
+  } catch { /* offline — try again next time */ }
+}
+setInterval(pollChanges, 15000);
 
 async function refreshUnread() {
   try {
@@ -308,6 +338,7 @@ function viewLogin() {
     <div class="who" role="group" aria-label="Who are you?">${S.people.map((p) => `<button type="button" data-id="${p.id}" aria-pressed="${p.id === who}"><span class="avatar round" style="background:${esc(p.color)}" aria-hidden="true">${esc(p.name[0])}</span>${esc(p.name)}</button>`).join('')}</div>
     <div class="field"><label class="lbl" for="pw">Password</label><input class="input" id="pw" type="password" required autocomplete="current-password"></div>
     <p class="error" id="err" hidden></p>
+    <button type="button" class="textbtn" id="forgot" style="align-self:center;font-size:14px">Forgot password?</button>
     <div class="spacer"></div>
     ${installTip()}
     <button class="btn" type="submit">Sign in</button>
@@ -316,6 +347,13 @@ function viewLogin() {
     who = Number(el.dataset.id);
     $app.querySelectorAll('.who button').forEach((b) => b.setAttribute('aria-pressed', String(b === el)));
     $app.querySelector('#pw').focus();
+  });
+  $app.querySelector('#forgot').addEventListener('click', () => {
+    const me = S.people.find((p) => p.id === who);
+    const other = S.people.find((p) => p.id !== who);
+    dialog(`<h2 class="h2">Forgot your password?</h2>
+      <p style="font-size:15px;line-height:1.5">Ask ${esc(other ? other.name : 'the other person')} to open SpareTime and go to <b>Activity → Settings → Reset ${esc(me ? me.name : 'your')}'s password</b>. They'll get a temporary password to give you.</p>
+      <button class="btn" data-close>Got it</button>`, () => {});
   });
   $app.querySelector('#login').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -342,9 +380,9 @@ async function viewMonth(dateParam) {
   const sel = dateParam || S.monthSel || S.today;
   S.monthSel = sel;
   const first = sel.slice(0, 8) + '01';
-  const start = addDays(first, -dow(first));
+  const start = weekStartOf(first);
   const dim = new Date(Date.UTC(Number(sel.slice(0, 4)), Number(sel.slice(5, 7)), 0)).getUTCDate();
-  const weeks = Math.ceil((dow(first) + dim) / 7);
+  const weeks = Math.ceil((wpos(first) + dim) / 7);
   const end = addDays(start, weeks * 7 - 1);
   let events = S.monthCache && S.monthCache.key === start + end ? S.monthCache.events : null;
   if (!events) {
@@ -372,7 +410,7 @@ function renderMonth(sel, start, weeks, all, loading) {
     const bars = (h.length ? `<span class="bar holiday">${esc(h[0].name.replace(' (observed)', ''))}</span>` : '')
       + evs.slice(0, room).map((e) => {
         if (!(e.span > 1)) return `<span class="bar" style="background:${esc(e.category.color)}">${esc(e.masked ? 'Busy' : e.title)}</span>`;
-        const wd = dow(d);
+        const wd = wpos(d);
         const cls = [e.day_index > 0 && wd !== 0 && 'cont-l', e.day_index < e.span - 1 && wd !== 6 && 'cont-r'].filter(Boolean).join(' ');
         const label = e.day_index === 0 || wd === 0 ? (e.masked ? 'Busy' : e.title) : '\u00a0';
         return `<span class="bar ${cls}" style="background:${esc(e.category.color)}">${esc(label)}</span>`;
@@ -389,9 +427,9 @@ function renderMonth(sel, start, weeks, all, loading) {
       <div><p class="kicker"><img src="/icons/mark.png" alt="">${esc(S.people.map((p) => p.name).join(' & '))}</p><h1 class="title">${MON[Number(sel.slice(5, 7)) - 1]}${yr}</h1></div>
       <div style="display:flex;gap:8px"><a class="circle" href="#/search" aria-label="Search" style="color:var(--text)">${I.search}</a><button class="circle" data-nav="-1" aria-label="Previous month">${I.left}</button><button class="circle" data-nav="1" aria-label="Next month">${I.right}</button></div>
     </header>
-    <div class="seg" role="group" aria-label="Whose events to show">${seg.map(([k, l]) => `<button data-filter="${k}" aria-pressed="${S.filter === k}">${esc(l)}</button>`).join('')}</div>
+    ${calControls(seg)}
     <section class="cal" aria-label="${MON[Number(sel.slice(5, 7)) - 1]} calendar" ${loading ? 'aria-busy="true"' : ''}>
-      <div class="cal-dow" aria-hidden="true">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((x) => `<span>${x}</span>`).join('')}</div>
+      <div class="cal-dow" aria-hidden="true">${DOW_LETTERS().map((x) => `<span>${x}</span>`).join('')}</div>
       <div class="cal-grid">${cells}</div>
     </section>
     <section class="section" style="margin-top:4px">
@@ -409,6 +447,7 @@ function renderMonth(sel, start, weeks, all, loading) {
     viewMonth(el.dataset.date).catch(fail);
   });
   on($app, '[data-nav]', 'click', (e, el) => shiftMonth(Number(el.dataset.nav)));
+  bindViewSwitch(sel);
   on($app, '[data-filter]', 'click', (e, el) => {
     S.filter = el.dataset.filter;
     localStorage.setItem('st-filter', S.filter);
@@ -425,6 +464,20 @@ function renderMonth(sel, start, weeks, all, loading) {
   });
 }
 
+function calControls(seg) {
+  return `<div class="cal-controls">
+    <div class="seg compact" role="group" aria-label="View"><button data-view="month" aria-pressed="${S.calView === 'month'}">Month</button><button data-view="week" aria-pressed="${S.calView === 'week'}">Week</button></div>
+    <div class="seg compact" role="group" aria-label="Whose events to show" style="flex:1">${seg.map(([k, l]) => `<button data-filter="${k}" aria-pressed="${S.filter === k}">${esc(l)}</button>`).join('')}</div>
+  </div>`;
+}
+function bindViewSwitch(date) {
+  on($app, '[data-view]', 'click', (e, el) => {
+    S.calView = el.dataset.view;
+    localStorage.setItem('st-calview', S.calView);
+    location.hash = `#/${S.calView}/${date}`;
+  });
+}
+
 function shiftMonth(n) {
   const [y, m] = S.monthSel.split('-').map(Number);
   const target = new Date(Date.UTC(y, m - 1 + n, 1));
@@ -433,6 +486,140 @@ function shiftMonth(n) {
   history.replaceState(null, '', `#/month/${pick}`);
   S.base = location.hash;
   viewMonth(pick).catch(fail);
+}
+
+// ---------------------------------------------------------------- week
+const WK_START_HOUR = 6;
+const WK_END_HOUR = 24;
+const HOUR_PX = 48;
+const toMin = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+
+async function viewWeek(dateParam) {
+  const anchor = dateParam || S.weekSel || S.monthSel || S.today;
+  S.weekSel = anchor;
+  const start = weekStartOf(anchor);
+  const end = addDays(start, 6);
+  const cacheKey = 'w' + start;
+  let events = S.weekCache && S.weekCache.key === cacheKey ? S.weekCache.events : null;
+  if (!events) {
+    events = await api(`/events?from=${start}&to=${end}`);
+    S.weekCache = { key: cacheKey, events };
+  }
+  renderWeek(anchor, start, filterEvents(events));
+}
+
+function renderWeek(anchor, start, events) {
+  const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
+  const hol = holidaysBetween(days[0], days[6], S.holidays);
+  const lane = {};   // all-day / multi-day bars per day
+  const timed = {};  // timed blocks per day
+  for (const e of events) {
+    const d = dayOf(e);
+    if (e.all_day || e.span > 1) (lane[d] ||= []).push(e);
+    else (timed[d] ||= []).push(e);
+  }
+  const m0 = MON[Number(days[0].slice(5, 7)) - 1].slice(0, 3);
+  const m6 = MON[Number(days[6].slice(5, 7)) - 1].slice(0, 3);
+  const title = m0 === m6 ? `${m0} ${Number(days[0].slice(8))}–${Number(days[6].slice(8))}` : `${m0} ${Number(days[0].slice(8))} – ${m6} ${Number(days[6].slice(8))}`;
+  const seg = [['both', 'Both'], ['me', S.me.name], ['partner', S.partner ? S.partner.name : 'Partner']];
+
+  const head = days.map((d) => `<a class="wk-day ${d === S.today ? 'today' : ''}" href="#/month/${d}" aria-label="${prettyDate(d, true)}"><span>${DOW[dow(d)].slice(0, 1)}</span><b>${Number(d.slice(8))}</b></a>`).join('');
+  const laneCells = days.map((d) => {
+    const h = (hol[d] || []).map((x) => `<span class="bar holiday">${esc(x.name.replace(' (observed)', ''))}</span>`).join('');
+    const bars = (lane[d] || []).map((e) => {
+      const wd = wpos(d);
+      const cls = [e.span > 1 && e.day_index > 0 && wd !== 0 && 'cont-l', e.span > 1 && e.day_index < e.span - 1 && wd !== 6 && 'cont-r'].filter(Boolean).join(' ');
+      const label = !(e.span > 1) || e.day_index === 0 || wd === 0 ? (e.masked ? 'Busy' : e.title) : ' ';
+      return e.masked ? `<span class="bar ${cls}" style="background:${esc(e.category.color)}">${esc(label)}</span>`
+        : `<a class="bar ${cls}" href="#/event/${e.id}/${e.occ_date}" style="background:${esc(e.category.color)}">${esc(label)}</a>`;
+    }).join('');
+    return `<div class="wk-lane-cell">${h}${bars}</div>`;
+  }).join('');
+  const hasLane = days.some((d) => (lane[d] || []).length || (hol[d] || []).length);
+
+  const hours = [];
+  for (let h = WK_START_HOUR; h < WK_END_HOUR; h++) hours.push(`<div class="wk-hour" style="top:${(h - WK_START_HOUR) * HOUR_PX}px"><span>${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? 'AM' : 'PM'}</span></div>`);
+  const cols = days.map((d) => {
+    const list = (timed[d] || []).map((e) => {
+      const s = Math.max(toMin(e.start_time || '00:00'), WK_START_HOUR * 60);
+      const en = Math.min(Math.max(e.end_time ? toMin(e.end_time) : s + 60, s + 30), WK_END_HOUR * 60);
+      return { e, s, en };
+    }).sort((x, y) => x.s - y.s || y.en - x.en);
+    // Side-by-side lanes for overlapping events.
+    const lanesEnd = [];
+    for (const it of list) {
+      let i = lanesEnd.findIndex((endAt) => endAt <= it.s);
+      if (i === -1) { i = lanesEnd.length; lanesEnd.push(0); }
+      lanesEnd[i] = it.en;
+      it.lane = i;
+    }
+    const n = Math.max(1, lanesEnd.length);
+    const blocks = list.map(({ e, s, en, lane: ln }) => {
+      const top = ((s - WK_START_HOUR * 60) / 60) * HOUR_PX;
+      const height = Math.max(((en - s) / 60) * HOUR_PX - 2, 20);
+      const style = `top:${top}px;height:${height}px;left:calc(${(ln / n) * 100}% + 1px);width:calc(${100 / n}% - 2px);background:${esc(e.category.color)}`;
+      const inner = `<b>${esc(e.masked ? 'Busy' : e.title)}</b>${height > 34 && n === 1 ? `<span>${esc(prettyTime(e.start_time))}</span>` : ''}`;
+      return e.masked ? `<div class="wk-block ${n > 1 ? 'tight' : ''}" style="${style}">${inner}</div>` : `<a class="wk-block ${n > 1 ? 'tight' : ''}" href="#/event/${e.id}/${e.occ_date}" style="${style}" aria-label="${esc(e.title)}, ${esc(prettyDate(d))} ${esc(prettyTime(e.start_time))}">${inner}</a>`;
+    }).join('');
+    let now = '';
+    if (d === S.today) {
+      const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
+      if (nowMin >= WK_START_HOUR * 60) now = `<div class="wk-now" style="top:${((nowMin - WK_START_HOUR * 60) / 60) * HOUR_PX}px"></div>`;
+    }
+    return `<div class="wk-col ${d === S.today ? 'today' : ''}" data-day="${d}">${blocks}${now}</div>`;
+  }).join('');
+
+  setScreenKeep(`<main class="screen">
+    <header class="head">
+      <div><p class="kicker"><img src="/icons/mark.png" alt="">${esc(S.people.map((p) => p.name).join(' & '))}</p><h1 class="title" style="font-size:26px">${title}</h1></div>
+      <div style="display:flex;gap:8px"><a class="circle" href="#/search" aria-label="Search" style="color:var(--text)">${I.search}</a><button class="circle" data-wnav="-7" aria-label="Previous week">${I.left}</button><button class="circle" data-wnav="7" aria-label="Next week">${I.right}</button></div>
+    </header>
+    ${calControls(seg)}
+    <section class="wk" aria-label="Week of ${prettyDate(days[0], true)}">
+      <div class="wk-head"><span></span>${head}</div>
+      ${hasLane ? `<div class="wk-lane"><span class="wk-gutter-label">All day</span>${laneCells}</div>` : ''}
+      <div class="wk-body" style="height:${(WK_END_HOUR - WK_START_HOUR) * HOUR_PX}px">
+        <div class="wk-gutter">${hours.join('')}</div>
+        <div class="wk-cols">${cols}</div>
+      </div>
+    </section>
+  </main>${navHtml('month')}`);
+
+  on($app, '[data-wnav]', 'click', (e, el) => shiftWeek(Number(el.dataset.wnav)));
+  bindViewSwitch(anchor);
+  on($app, '[data-filter]', 'click', (e, el) => {
+    S.filter = el.dataset.filter;
+    localStorage.setItem('st-filter', S.filter);
+    viewWeek(S.weekSel).catch(fail);
+  });
+  on($app, '.wk-col', 'click', (e, el) => {
+    if (e.target.closest('.wk-block')) return;
+    const rect = el.getBoundingClientRect();
+    const hour = Math.min(WK_END_HOUR - 1, WK_START_HOUR + Math.floor((e.clientY - rect.top) / HOUR_PX));
+    location.hash = `#/add?date=${el.dataset.day}&time=${pad(hour)}:00`;
+  });
+  const wk = $app.querySelector('.wk');
+  let x0 = null;
+  wk.addEventListener('touchstart', (e) => { x0 = e.touches[0].clientX; }, { passive: true });
+  wk.addEventListener('touchend', (e) => {
+    if (x0 == null) return;
+    const dx = e.changedTouches[0].clientX - x0;
+    x0 = null;
+    if (Math.abs(dx) > 70) shiftWeek(dx < 0 ? 7 : -7);
+  });
+  if (!S.weekScrolled) {
+    S.weekScrolled = true;
+    const body = $app.querySelector('.wk-body');
+    const target = body.getBoundingClientRect().top + window.scrollY + (8 - WK_START_HOUR) * HOUR_PX - 140;
+    window.scrollTo(0, Math.max(0, target));
+  }
+}
+
+function shiftWeek(n) {
+  const d = addDays(S.weekSel, n);
+  history.replaceState(null, '', `#/week/${d}`);
+  S.base = location.hash;
+  viewWeek(d).catch(fail);
 }
 
 // Re-render without jumping scroll position (used for in-place updates).
@@ -569,6 +756,7 @@ async function viewEvent(id, date) {
 
     ${e.also.length ? `<section class="section"><h2 class="h2">Also that day</h2>${e.also.map((a) => evCard(a)).join('')}</section>` : ''}
 
+    <a class="btn ghost" href="#/add?copy=${e.id}&date=${e.occ_date}">${I.copy}Duplicate</a>
     ${e.can_edit ? `<button class="btn danger" id="delete">${I.trash}Delete event</button>` : ''}
   </main>`);
   bindBack();
@@ -656,7 +844,7 @@ function askMinutes(done, allDay = false) {
 function confirmDelete(e) {
   const repeating = e.repeat && e.repeat !== 'none';
   dialog(`<h2 class="h2">Delete “${esc(e.title)}”?</h2>
-    ${repeating ? `<button class="btn" data-scope="one">Just ${esc(prettyDate(e.occ_date))}</button><button class="btn ghost" data-scope="all" style="color:var(--danger)">Every time it repeats</button>`
+    ${repeating ? `<button class="btn" data-scope="one">Just ${esc(prettyDate(e.occ_date))}</button>${e.occ_date > e.date ? `<button class="btn ghost" data-scope="future">This and future ones</button>` : ''}<button class="btn ghost" data-scope="all" style="color:var(--danger)">Every time it repeats</button>`
       : `<button class="btn" data-scope="all" style="background:var(--danger);color:#fff">Delete</button>`}
     <button class="btn ghost" data-close>Cancel</button>`, (w, close) => {
     w.querySelectorAll('[data-scope]').forEach((b) => b.addEventListener('click', async () => {
@@ -685,23 +873,29 @@ function catsFor(owner) {
 async function openEventSheet(editId, date, q) {
   S.sheetPushed = true;
   let f;
-  if (editId) {
-    const e = await api(`/events/${editId}${isDate(date) ? `?date=${date}` : ''}`);
+  let series = null; // for repeating events: the series' first date and the occurrence being edited
+  const copyId = !editId && Number(q.get('copy')) ? Number(q.get('copy')) : null;
+  if (editId || copyId) {
+    const src = editId || copyId;
+    const occParam = editId ? date : q.get('date');
+    const e = await api(`/events/${src}${isDate(occParam) ? `?date=${occParam}` : ''}`);
+    if (editId && e.repeat !== 'none') series = { date: e.date, occ: e.occ_date };
     f = {
-      title: e.title, owner: ownerKey(e.owner_id), category_id: e.category.id, all_day: e.all_day, date: e.date,
-      multi: !!e.series_end_date, end_date: e.series_end_date || '',
+      title: e.title, owner: ownerKey(e.owner_id), category_id: e.category.id, all_day: e.all_day, date: e.occ_date,
+      multi: e.span > 1, end_date: e.end_date || '',
       start_time: e.start_time || '', end_time: e.end_time || '', repeat: e.repeat, repeat_until: e.repeat_until || '',
       location: e.location || '', notes: e.notes || '', reminders: e.my_reminders, visibility: e.visibility,
       notify_partner: e.heads_up ? e.heads_up.notify_partner : true, partner_night: e.heads_up ? e.heads_up.partner_night : false,
-      occ: e.occ_date,
+      occ: e.occ_date, remTouched: true, remind_partner: true,
     };
+    if (copyId) { f.repeat = 'none'; f.repeat_until = ''; }
   } else {
     const d = isDate(q.get('date')) ? q.get('date') : (S.monthSel && S.monthSel >= S.today ? S.monthSel : S.today);
     const who = ['me', 'partner', 'both'].includes(q.get('who')) ? q.get('who') : 'me';
     f = {
       title: '', owner: who, category_id: null, all_day: false, date: d, multi: false, end_date: '', start_time: q.get('time') || '18:00', end_time: '',
       repeat: 'none', repeat_until: '', location: '', notes: '', reminders: ['night'], visibility: 'shared',
-      notify_partner: true, partner_night: false,
+      notify_partner: true, partner_night: false, remTouched: false, remind_partner: true,
     };
     if (who === 'both') { const dn = S.cats.find((c) => c.owner_id == null && /date/i.test(c.name)); if (dn) f.category_id = dn.id; }
   }
@@ -710,9 +904,9 @@ async function openEventSheet(editId, date, q) {
   $overlay.innerHTML = `<div class="backdrop" data-dismiss></div>
     <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
       <div class="grab" aria-hidden="true"></div>
-      <div class="sheet-head"><button class="textbtn" data-dismiss style="width:76px">Cancel</button><h1 id="sheet-title">${editId ? 'Edit event' : 'New event'}</h1><span style="width:76px"></span></div>
+      <div class="sheet-head"><button class="textbtn" data-dismiss style="width:76px">Cancel</button><h1 id="sheet-title">${editId ? 'Edit event' : copyId ? 'Copy event' : 'New event'}</h1><span style="width:76px"></span></div>
       <div class="sheet-body">
-        ${editId ? '' : `<div class="card quick"><label class="lbl" for="quick" style="display:flex;align-items:center;gap:6px;font-weight:700">${I.bolt}Quick add — just type it</label>
+        ${editId || copyId ? '' : `<div class="card quick"><label class="lbl" for="quick" style="display:flex;align-items:center;gap:6px;font-weight:700">${I.bolt}Quick add — just type it</label>
           <input id="quick" type="text" autocomplete="off" placeholder="GG league every Thu 6:30" enterkeyhint="done">
           <div id="parsed" hidden></div></div>`}
         <div id="form-fields" style="display:flex;flex-direction:column;gap:18px"></div>
@@ -723,6 +917,12 @@ async function openEventSheet(editId, date, q) {
   const fields = $overlay.querySelector('#form-fields');
   let addingCat = false;
   let newCatColor = SWATCHES[5];
+
+  function applyCategoryDefaults() {
+    if (f.remTouched) return;
+    const c = S.cats.find((x) => x.id === f.category_id);
+    f.reminders = (c && c.my_reminders) || ['night'];
+  }
 
   function render() {
     const cats = catsFor(f.owner);
@@ -755,6 +955,7 @@ async function openEventSheet(editId, date, q) {
       <div class="field"><label class="lbl" for="f-notes">Notes</label><textarea class="input" id="f-notes" maxlength="2000" placeholder="Lane assignments, what to bring…">${esc(f.notes)}</textarea></div>
       <div class="field"><span class="lbl" id="rem-l">Remind me</span><div class="chips" role="group" aria-labelledby="rem-l">${presetsFor(f.all_day).map((k) => `<button type="button" class="chip solid" data-rem="${k}" aria-pressed="${f.reminders.includes(k)}">${kindLabel(k)}</button>`).join('')}${extraKinds(f.reminders).map((k) => `<button type="button" class="chip solid" data-rem="${k}" aria-pressed="true">${kindLabel(k)}</button>`).join('')}<button type="button" class="chip dashed" id="rem-custom">${I.plusSm}Custom</button></div></div>
       ${mine && S.partner ? `<div class="field"><span class="lbl" id="vis-l">Who can see it</span><div class="seg" role="group" aria-labelledby="vis-l">${[['shared', 'Shared'], ['busy', 'Busy only'], ['private', 'Private']].map(([k, l]) => `<button type="button" data-vis="${k}" aria-pressed="${f.visibility === k}">${l}</button>`).join('')}</div><span class="muted">${esc(visHelp)}</span></div>` : ''}
+      ${S.partner && f.owner === 'both' && !editId ? `<div class="card rows">${toggleRow('f-premind', `Remind ${other} too`, f.remind_partner, `${other} gets their own reminders — yours stay yours`)}</div>` : ''}
       ${S.partner && f.visibility !== 'private' ? `<div class="card rows">${toggleRow('f-notify', f.owner === 'both' ? `Let ${other} know` : f.owner === 'partner' ? `Let ${other} know you added it` : `Let ${other} know`, f.notify_partner, 'Sends a notification when you save')}
         ${mine ? toggleRow('f-pnight', `Remind ${other} the night before`, f.partner_night) : ''}</div>` : ''}`;
     updateSave();
@@ -773,15 +974,16 @@ async function openEventSheet(editId, date, q) {
     fields.querySelector('#f-where').addEventListener('input', (e) => { f.location = e.target.value; });
     fields.querySelector('#f-notes').addEventListener('input', (e) => { f.notes = e.target.value; });
     on(fields, '[data-owner]', 'click', (e, el) => { f.owner = el.dataset.owner; if (f.owner !== 'me') f.visibility = 'shared'; render(); });
-    on(fields, '[data-cat]', 'click', (e, el) => { f.category_id = Number(el.dataset.cat); render(); });
+    on(fields, '[data-cat]', 'click', (e, el) => { f.category_id = Number(el.dataset.cat); applyCategoryDefaults(); render(); });
     on(fields, '[data-vis]', 'click', (e, el) => { f.visibility = el.dataset.vis; render(); });
     on(fields, '[data-rem]', 'click', (e, el) => {
       const k = /^\d+$/.test(el.dataset.rem) ? Number(el.dataset.rem) : el.dataset.rem;
       f.reminders = f.reminders.includes(k) ? f.reminders.filter((x) => x !== k) : [...f.reminders, k];
+      f.remTouched = true;
       el.setAttribute('aria-pressed', String(f.reminders.includes(k)));
     });
     const rc = fields.querySelector('#rem-custom');
-    if (rc) rc.addEventListener('click', () => askMinutes((mins) => { if (!f.reminders.includes(mins)) f.reminders = [...f.reminders, mins]; render(); }, f.all_day));
+    if (rc) rc.addEventListener('click', () => askMinutes((mins) => { if (!f.reminders.includes(mins)) f.reminders = [...f.reminders, mins]; f.remTouched = true; render(); }, f.all_day));
     const nc = fields.querySelector('#new-cat');
     if (nc) nc.addEventListener('click', () => { addingCat = !addingCat; render(); if (addingCat) fields.querySelector('#nc-name').focus(); });
     on(fields, '[data-sw]', 'click', (e, el) => { newCatColor = el.dataset.sw; fields.querySelectorAll('[data-sw]').forEach((b) => b.setAttribute('aria-pressed', String(b === el))); });
@@ -806,6 +1008,7 @@ async function openEventSheet(editId, date, q) {
     }, fields);
     bindToggle('f-notify', async (v) => { f.notify_partner = v; updateSave(); }, fields);
     bindToggle('f-pnight', async (v) => { f.partner_night = v; }, fields);
+    bindToggle('f-premind', async (v) => { f.remind_partner = v; }, fields);
   }
 
   function updateSave() {
@@ -823,7 +1026,8 @@ async function openEventSheet(editId, date, q) {
       if (!p) { box.hidden = true; return; }
       if (p.title) f.title = p.title;
       if (p.owner) f.owner = p.owner;
-      if (p.category_id) f.category_id = p.category_id;
+      if (p.category_id) { f.category_id = p.category_id; applyCategoryDefaults(); }
+      f.remind_partner = !p.about_partner;
       if (p.date) f.date = p.date;
       f.multi = !!p.end_date;
       f.end_date = p.end_date || '';
@@ -849,7 +1053,20 @@ async function openEventSheet(editId, date, q) {
 
   render();
 
-  $overlay.querySelector('#save').addEventListener('click', async () => {
+  $overlay.querySelector('#save').addEventListener('click', () => {
+    if (series) {
+      return dialog(`<h2 class="h2">Change which ones?</h2>
+        <button class="btn" data-scope="one">Just ${esc(prettyDate(series.occ))}</button>
+        ${series.occ > series.date ? `<button class="btn ghost" data-scope="future">This and future ones</button>` : ''}
+        <button class="btn ghost" data-scope="all">Every time</button>
+        <button class="btn ghost" data-close style="box-shadow:none">Cancel</button>`, (w, close) => {
+        w.querySelectorAll('[data-scope]').forEach((b) => b.addEventListener('click', () => { close(); save(b.dataset.scope); }));
+      });
+    }
+    save('all');
+  });
+
+  async function save(scope) {
     const err = $overlay.querySelector('#sheet-err');
     err.hidden = true;
     const body = {
@@ -858,26 +1075,36 @@ async function openEventSheet(editId, date, q) {
       start_time: f.all_day ? null : f.start_time, end_time: f.all_day ? null : f.end_time || null,
       repeat: f.repeat, repeat_until: f.repeat_until || null, location: f.location, notes: f.notes,
       reminders: f.reminders, visibility: f.visibility, notify_partner: f.notify_partner, partner_night: f.partner_night,
+      remind_partner: f.remind_partner,
     };
+    // "Every time" edits the series: move its first date by however far this occurrence moved.
+    if (series && scope === 'all') {
+      const shift = daysBetween(series.occ, f.date);
+      body.date = addDays(series.date, shift);
+      if (body.end_date) body.end_date = addDays(series.date, daysBetween(series.occ, f.end_date));
+    }
     if (f.multi && !(f.end_date > f.date)) { err.textContent = 'Pick a last day after the first day'; err.hidden = false; return; }
     if (!f.multi && body.end_time && body.start_time && body.end_time <= body.start_time) { err.textContent = 'The end time is before the start'; err.hidden = false; return; }
     const btn = $overlay.querySelector('#save');
     btn.disabled = true;
     try {
+      let savedId = editId;
       if (editId) {
-        await api(`/events/${editId}`, { method: 'PUT', body });
-        if (S.partner && f.owner === 'me') await api(`/events/${editId}/heads-up`, { method: 'PUT', body: { partner_night: f.partner_night } }).catch(() => {});
+        const qs = series && scope !== 'all' ? `?scope=${scope}&date=${series.occ}` : '';
+        const r = await api(`/events/${editId}${qs}`, { method: 'PUT', body });
+        savedId = r.id || editId;
+        if (S.partner && f.owner === 'me') await api(`/events/${savedId}/heads-up`, { method: 'PUT', body: { partner_night: f.partner_night } }).catch(() => {});
       } else {
         await api('/events', { method: 'POST', body });
       }
-      S.monthCache = null;
+      S.monthCache = null; S.weekCache = null;
       S.monthSel = f.date;
       toast(editId ? 'Saved' : body.notify_partner && S.partner && f.visibility !== 'private' ? `Saved — ${other} got a heads-up` : 'Saved');
-      closeSheet(editId ? `#/event/${editId}/${f.date}` : `#/month/${f.date}`);
+      closeSheet(editId ? `#/event/${savedId}/${f.date}` : `#/${S.calView}/${f.date}`);
     } catch (e2) {
       err.textContent = e2.message; err.hidden = false; btn.disabled = false;
     }
-  });
+  }
 
   on($overlay, '[data-dismiss]', 'click', () => closeSheet());
 
@@ -961,6 +1188,7 @@ async function viewActivity() {
 
   setScreen(`<main class="screen">
     <header class="head"><div><p class="kicker">${other ? 'Pings between you two' : 'Your pings'}</p><h1 class="title">Activity</h1></div></header>
+    ${S.health && (S.health.stale || S.health.error) ? `<div class="banner warn">${I.bell}<span>Reminders may be delayed — ${S.health.error ? 'the scheduler hit a problem' : "the scheduler hasn't run in a while"}. It retries every 5 minutes.${S.people[0] && S.people[0].id !== S.me.id ? ` If this doesn't clear up, let ${esc(S.people[0].name)} know.` : " If this doesn't clear up, check Logs for the sparetime Worker in Cloudflare."}</span></div>` : ''}
     <div id="push-card"></div>
     <section class="recap" aria-label="This week">
       <div style="display:flex;align-items:center;justify-content:space-between"><span class="k">This week · ${esc(rangeText(w.from, w.to))}</span></div>
@@ -972,13 +1200,43 @@ async function viewActivity() {
     <section class="section"><h2 class="h2">Settings</h2><div class="card rows">
       <div class="row" style="flex-wrap:wrap;gap:10px"><span class="grow"><span class="t" id="hol-l">U.S. holidays</span><span class="s">Shown on this phone's calendar</span></span>
         <div class="seg" role="group" aria-labelledby="hol-l" style="width:100%">${[['all', 'All'], ['federal', 'Federal only'], ['off', 'Off']].map(([k, l]) => `<button data-hol="${k}" aria-pressed="${S.holidays === k}">${l}</button>`).join('')}</div></div>
-      <a class="row" href="#/categories"><span class="grow"><span class="t">Categories</span><span class="s">Add, remove or recolor yours</span></span>${I.right}</a>
+      <div class="row" style="flex-wrap:wrap;gap:10px"><span class="grow"><span class="t" id="ws-l">Week starts on</span></span>
+        <div class="seg" role="group" aria-labelledby="ws-l" style="width:100%">${[[0, 'Sunday'], [1, 'Monday']].map(([k, l]) => `<button data-ws="${k}" aria-pressed="${S.weekStart === k}">${l}</button>`).join('')}</div></div>
+      <a class="row" href="#/categories"><span class="grow"><span class="t">Categories</span><span class="s">Add, remove, recolor — and default reminders</span></span>${I.right}</a>
+      ${S.partner ? `<button class="row" id="reset-partner" style="border:0;background:none;width:100%;text-align:left"><span class="grow"><span class="t">Reset ${esc(S.partner.name)}'s password</span><span class="s">If ${esc(S.partner.name)} forgets it</span></span>${I.right}</button>` : ''}
+      <a class="row" href="/api/export" download><span class="grow"><span class="t">Download a backup</span><span class="s">All events and categories you can see, as a file</span></span>${I.right}</a>
       <button class="row" id="pw-btn" style="border:0;background:none;width:100%;text-align:left"><span class="grow"><span class="t">Change password</span></span>${I.right}</button>
       <button class="row" id="signout" style="border:0;background:none;width:100%;text-align:left;color:var(--danger)"><span class="grow"><span class="t">Sign out</span></span></button>
     </div></section>
   </main>${navHtml('activity')}`);
 
   for (const [k] of prefRows) bindToggle('pref-' + k, (v) => api('/prefs', { method: 'PUT', body: { [k]: v } }));
+  on($app, '[data-ws]', 'click', (e, el) => {
+    S.weekStart = Number(el.dataset.ws);
+    localStorage.setItem('st-weekstart', S.weekStart);
+    $app.querySelectorAll('[data-ws]').forEach((b) => b.setAttribute('aria-pressed', String(b === el)));
+    S.monthCache = null; S.weekCache = null;
+    toast(`Weeks start on ${S.weekStart ? 'Monday' : 'Sunday'}`);
+  });
+  const rp = $app.querySelector('#reset-partner');
+  if (rp) rp.addEventListener('click', () => dialog(`<h2 class="h2">Reset ${esc(S.partner.name)}'s password?</h2>
+    <p class="muted" style="font-size:14px">${esc(S.partner.name)} gets signed out and needs a temporary password from you to sign back in.</p>
+    <button class="btn" id="rp-go">Reset password</button><button class="btn ghost" data-close>Cancel</button>`, (w, close) => {
+    w.querySelector('#rp-go').addEventListener('click', async () => {
+      try {
+        const r = await api('/partner/reset-password', { method: 'POST' });
+        close();
+        dialog(`<h2 class="h2">Temporary password for ${esc(r.name)}</h2>
+          <p style="font-size:22px;font-weight:800;letter-spacing:0.02em;text-align:center;padding:10px;border-radius:12px;background:var(--surface2)">${esc(r.password)}</p>
+          <p class="muted" style="font-size:14px">Give this to ${esc(r.name)}. They can change it under Activity → Settings → Change password.</p>
+          <button class="btn" id="rp-copy">Copy</button><button class="btn ghost" data-close>Done</button>`, (w2) => {
+          w2.querySelector('#rp-copy').addEventListener('click', async () => {
+            try { await navigator.clipboard.writeText(r.password); toast('Copied'); } catch { toast('Select and copy it by hand'); }
+          });
+        });
+      } catch (err) { fail(err); }
+    });
+  }));
   on($app, '[data-hol]', 'click', (e, el) => {
     S.holidays = el.dataset.hol;
     localStorage.setItem('st-holidays', S.holidays);
@@ -1069,7 +1327,8 @@ async function viewCategories() {
   let color = SWATCHES[6];
   let target = 'mine';
   const count = (n) => (n === 0 ? 'No events yet' : n === 1 ? '1 event' : `${n} events`);
-  const row = (c, editable) => `<div class="row" style="padding:4px 4px 4px 16px"><span class="dot" style="width:14px;height:14px;background:${esc(c.color)}"></span><span class="grow" style="padding:8px 0"><span class="t">${esc(c.name)}</span><span class="s">${count(c.events)}</span></span>${editable ? `<button class="circle" style="box-shadow:none;background:transparent;color:var(--danger)" data-del="${c.id}" aria-label="Delete ${esc(c.name)}">${I.trash}</button>` : ''}</div>`;
+  const remText = (c) => (c.my_reminders ? (c.my_reminders.length ? 'Reminders: ' + c.my_reminders.map((k) => kindLabel(k).replace(' before', '')).join(', ') : 'No reminders') : 'Reminders: night before');
+  const row = (c, editable) => `<div class="row" style="padding:4px 4px 4px 16px"><span class="dot" style="width:14px;height:14px;background:${esc(c.color)}"></span><span class="grow" style="padding:8px 0"><span class="t">${esc(c.name)}</span><span class="s">${count(c.events)}${editable ? ' · ' + esc(remText(c)) : ''}</span></span>${editable ? `<button class="circle" style="box-shadow:none;background:transparent;color:var(--text)" data-rems="${c.id}" aria-label="Default reminders for ${esc(c.name)}">${I.bell.replace('width="22" height="22"', 'width="19" height="19"')}</button><button class="circle" style="box-shadow:none;background:transparent;color:var(--danger)" data-del="${c.id}" aria-label="Delete ${esc(c.name)}">${I.trash}</button>` : ''}</div>`;
   setScreen(`<main class="screen no-nav">
     <div class="topbar"><a class="textbtn" href="#/activity">${I.left}Back</a></div>
     <div><h1 class="title">Categories</h1><p class="muted" style="font-size:14px;margin-top:4px">Each of you manages your own. Shared ones either of you can change.</p></div>
@@ -1090,6 +1349,23 @@ async function viewCategories() {
     const name = $app.querySelector('#cat-name').value.trim();
     if (!name) return $app.querySelector('#cat-name').focus();
     try { await api('/categories', { method: 'POST', body: { name, color, shared: target === 'shared' } }); toast(`Added ${name}`); viewCategories(); } catch (err) { fail(err); }
+  });
+  on($app, '[data-rems]', 'click', (e, el) => {
+    const c = S.cats.find((x) => x.id === Number(el.dataset.rems));
+    let kinds = c.my_reminders ? [...c.my_reminders] : ['night'];
+    dialog(`<h2 class="h2">Default reminders for ${esc(c.name)}</h2>
+      <p class="muted" style="font-size:14px">New ${esc(c.name)} events start with these. You can still change them per event.</p>
+      <div class="chips">${REMINDER_PRESETS.map((k) => `<button class="chip solid" data-k="${k}" aria-pressed="${kinds.includes(k)}">${kindLabel(k)}</button>`).join('')}</div>
+      <button class="btn" id="cr-save">Save</button><button class="btn ghost" data-close>Cancel</button>`, (w, close) => {
+      w.querySelectorAll('[data-k]').forEach((b) => b.addEventListener('click', () => {
+        const k = /^\d+$/.test(b.dataset.k) ? Number(b.dataset.k) : b.dataset.k;
+        kinds = kinds.includes(k) ? kinds.filter((x) => x !== k) : [...kinds, k];
+        b.setAttribute('aria-pressed', String(kinds.includes(k)));
+      }));
+      w.querySelector('#cr-save').addEventListener('click', async () => {
+        try { await api(`/categories/${c.id}/reminders`, { method: 'PUT', body: { kinds } }); close(); toast(`Saved defaults for ${c.name}`); viewCategories(); } catch (err) { fail(err); }
+      });
+    });
   });
   on($app, '[data-del]', 'click', async (e, el) => {
     const c = S.cats.find((x) => x.id === Number(el.dataset.del));

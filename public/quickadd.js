@@ -65,7 +65,13 @@ export function parseQuick(text, ctx) {
   const partnerName = ctx.partner ? ctx.partner.name.toLowerCase() : null;
   const names = [ctx.me.name, ctx.partner && ctx.partner.name].filter(Boolean).map((n) => n.toLowerCase());
   const specialDay = new RegExp(`\\b(${names.join('|')}|my|our)('s)? (birthday|bday|b-day|anniversary)\\b`).test(s);
-  if (specialDay) out.owner = 'both';
+  if (specialDay) {
+    out.owner = 'both';
+    // "Kelsey's birthday" is about the other person — don't send them the reminders.
+    if (partnerName && new RegExp(`\\b${partnerName}('s)? (birthday|bday|b-day)\\b`).test(s)) out.about_partner = true;
+  }
+  // "with Kelsey" / "and Kelsey" = something you're doing together; "Kelsey's …" / "Kelsey …" = hers.
+  else if (partnerName && new RegExp(`\\b(with|and|&) ${partnerName}\\b`).test(s)) out.owner = 'both';
   else if (partnerName && new RegExp(`\\b${partnerName}('s)?\\b`).test(s)) { out.owner = 'partner'; take(new RegExp(`\\b${partnerName}('s)?\\b`)); }
   else if (/\b(we|us|both|our)\b/.test(s)) out.owner = 'both';
 

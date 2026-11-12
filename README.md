@@ -7,6 +7,10 @@ One calendar for the two of you. A home-screen web app for iPhone and Android, r
 - Push notifications: partner adds/changes, reminders, both-booked, weather alerts, Sunday recap
 - Quick add ("GG league every Thu 6:30"), Free together finder, countdown, reactions, on-my-way
 - Multi-day events (tournaments, trips — up to 31 days), yearly repeats (birthdays, anniversaries), and search
+- Week view (hour by hour), Sunday/Monday week start, duplicate events, edit/delete "just this one / this and future / all"
+- Live updates (the app polls `/api/rev` every 15 s), per-person reminders on shared events, default reminders per category
+- Forgot password: either person can reset the other's under Activity → Settings; backups via Activity → Download a backup
+- Health: the scheduler records a heartbeat; if it fails you both get one alert a day and Activity shows a banner
 - U.S. holidays (federal + popular ones, calculated in `public/holidays.js`); choose All / Federal only / Off under Activity → Settings
 
 ## Deploy

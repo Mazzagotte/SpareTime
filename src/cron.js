@@ -140,3 +140,28 @@ export async function runCron(env, ctx, now = Date.now()) {
   }
   return log;
 }
+
+// Wraps the scheduled job: records a heartbeat, and if something breaks, alerts both of you (once a day).
+export async function runCronSafe(env, ctx) {
+  try {
+    await runCron(env, ctx);
+    await env.DB.prepare("INSERT INTO config (key, value) VALUES ('cron_last', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
+      .bind(String(Date.now())).run();
+  } catch (e) {
+    const message = (e && e.message) || String(e);
+    console.log('cron failed', e && e.stack);
+    try {
+      await env.DB.prepare("INSERT INTO config (key, value) VALUES ('cron_error', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
+        .bind(JSON.stringify({ at: Date.now(), message: message.slice(0, 200) })).run();
+      const today = zonedParts(env.TIMEZONE).date;
+      if (await claim(env, `cronerr:${today}`)) {
+        const { results: ppl } = await env.DB.prepare('SELECT id FROM users').all();
+        await Promise.all(ppl.map((p) => pushToUser(env, p.id, {
+          title: 'SpareTime hit a problem',
+          body: 'Reminders may be delayed. It keeps retrying every 5 minutes.',
+          url: '/#/activity', tag: 'health',
+        })));
+      }
+    } catch { /* nothing else we can do */ }
+  }
+}
