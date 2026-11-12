@@ -144,6 +144,7 @@ function on(root, sel, evt, fn) {
 }
 
 function avatar(e, cls = '') {
+  cls = cls === 'round' ? 'round' : cls;
   if (e.owner_id == null) {
     const ini = S.people.map((p) => p.name[0]).join('+');
     return `<span class="avatar both ${cls}" aria-hidden="true" style="background:${esc(e.category.color)}">${esc(ini)}</span>`;
@@ -159,9 +160,31 @@ function evCard(e, { showTime = false } = {}) {
     ? `${e.owner_name} · Private`
     : [showTime && !multi ? null : when, e.owner_name, e.category.name !== 'Other' ? e.category.name : null].filter(Boolean).join(' · ');
   const right = multi ? `${e.day_index + 1}/${e.span}` : e.all_day ? 'All day' : prettyTime(e.start_time);
-  const inner = `${avatar(e)}<span class="grow"><span class="t">${esc(e.title)}</span><span class="s">${esc(meta)}</span></span>${showTime ? `<span class="time">${esc(right)}</span>` : `<span style="color:var(--muted)">${I.right}</span>`}`;
-  if (e.masked) return `<div class="evcard">${inner}</div>`;
-  return `<a class="evcard" href="#/event/${e.id}/${e.occ_date}">${inner}</a>`;
+  const inner = `${avatar(e, 'round')}<span class="grow"><span class="t">${esc(e.title)}</span><span class="s">${esc(meta)}</span></span>${showTime ? `<span class="time">${esc(right)}</span>` : `<span style="color:var(--muted)">${I.right}</span>`}`;
+  const tint = `--c:${esc(e.category.color)}`;
+  if (e.masked) return `<div class="evcard tinted" style="${tint}">${inner}</div>`;
+  // Swipe right = duplicate, swipe left = delete, long-press = menu (see gestures below).
+  return `<div class="swipe" data-id="${e.id}" data-occ="${e.occ_date}" data-date="${esc(e.date || e.occ_date)}" data-repeat="${esc(e.repeat || 'none')}" data-title="${esc(e.title)}" data-edit="${e.can_edit ? 1 : 0}">
+    <div class="swipe-bg dup">${I.copy}Duplicate</div><div class="swipe-bg del">Delete${I.trash}</div>
+    <a class="evcard tinted" style="${tint}" href="#/event/${e.id}/${e.occ_date}">${inner}</a></div>`;
+}
+
+// ---------- haptics (Android; iPhone web apps can't vibrate) ----------
+const buzz = (ms = 10) => { try { navigator.vibrate && navigator.vibrate(ms); } catch { /* ignore */ } };
+
+// ---------- empty-state art ----------
+function emptyArt() {
+  return `<svg width="72" height="64" viewBox="0 0 72 64" aria-hidden="true"><rect x="10" y="10" width="52" height="46" rx="10" fill="var(--surface2)"/><rect x="10" y="10" width="52" height="13" rx="6" fill="var(--field)"/><rect x="21" y="5" width="5" height="11" rx="2.5" fill="var(--sub)"/><rect x="46" y="5" width="5" height="11" rx="2.5" fill="var(--sub)"/><path d="M36 50c-1-.9-10-7-10-12.4 0-3.2 2.4-5.6 5.3-5.6 2 0 3.6 1.1 4.7 2.7 1.1-1.6 2.7-2.7 4.7-2.7 2.9 0 5.3 2.4 5.3 5.6C46 43 37 49.1 36 50Z" fill="#F59E0B"/></svg>`;
+}
+function empty(text, action = '') {
+  return `<div class="empty">${emptyArt()}<span>${text}</span>${action}</div>`;
+}
+
+// ---------- loading placeholders ----------
+function skeleton(rows = 4) {
+  return `<main class="screen"><header class="head"><div style="display:flex;flex-direction:column;gap:8px"><i class="sk" style="width:110px;height:12px"></i><i class="sk" style="width:190px;height:30px"></i></div></header>
+    ${Array.from({ length: rows }, () => `<div class="evcard"><i class="sk" style="width:36px;height:36px;border-radius:999px"></i><span class="grow"><i class="sk" style="width:60%;height:14px"></i><i class="sk" style="width:40%;height:11px;margin-top:6px"></i></span></div>`).join('')}
+  </main>`;
 }
 
 function navHtml(active) {
@@ -173,7 +196,11 @@ function navHtml(active) {
 
 function setScreen(html) {
   $app.innerHTML = html;
+  const scr = $app.querySelector('.screen, .welcome');
+  if (scr && S.anim) scr.classList.add('anim-' + S.anim);
+  S.anim = null;
   window.scrollTo(0, 0);
+  updateMinibar();
 }
 
 // ---------------------------------------------------------------- boot & routing
@@ -219,6 +246,12 @@ async function doRoute() {
     return openEventSheet(view === 'edit' ? Number(a) : null, b, q);
   }
   $overlay.innerHTML = '';
+  const TABS = ['month', 'week', 'agenda', 'activity', undefined];
+  const prevTab = TABS.includes(S.lastView);
+  const nowTab = TABS.includes(view);
+  S.anim = S.lastView === undefined && !S.routedOnce ? 'fade' : nowTab && prevTab ? 'fade' : nowTab ? 'back' : 'fwd';
+  S.routedOnce = true;
+  S.lastView = view;
   S.sheetPushed = false;
   if (view === 'search' && S.base && !S.base.startsWith('#/search') && !S.base.startsWith('#/event')) S.searchBack = S.base;
   S.base = location.hash || '#/month';
@@ -230,7 +263,7 @@ async function renderBase(hash) {
   const [view, a, b] = parts;
   switch (view) {
     case 'agenda': return viewAgenda();
-    case 'event': return viewEvent(Number(a), b);
+    case 'event': return viewEvent(Number(a), b && b.split('?')[0]);
     case 'activity': return viewActivity();
     case 'categories': return viewCategories();
     case 'free': return viewFree();
@@ -423,8 +456,9 @@ function renderMonth(sel, start, weeks, all, loading) {
   const both = S.filter === 'both' && S.partner && owners.has(S.me.id) && owners.has(S.partner.id);
   const seg = [['both', 'Both'], ['me', S.me.name], ['partner', S.partner ? S.partner.name : 'Partner']];
   setScreenKeep(`<main class="screen">
-    <header class="head">
-      <div><p class="kicker"><img src="/icons/mark.png" alt="">${esc(S.people.map((p) => p.name).join(' & '))}</p><h1 class="title">${MON[Number(sel.slice(5, 7)) - 1]}${yr}</h1></div>
+    <a class="kicker greet" href="#/month/${S.today}"><img src="/icons/mark.png" alt="">${esc(greeting(S.today >= start && S.today <= addDays(start, weeks * 7 - 1) ? byDay[S.today] || [] : null))}</a>
+    <header class="head" style="padding-top:0;margin-top:-8px">
+      <div><h1 class="title">${MON[Number(sel.slice(5, 7)) - 1]}${yr}</h1></div>
       <div style="display:flex;gap:8px"><a class="circle" href="#/search" aria-label="Search" style="color:var(--text)">${I.search}</a><button class="circle" data-nav="-1" aria-label="Previous month">${I.left}</button><button class="circle" data-nav="1" aria-label="Next month">${I.right}</button></div>
     </header>
     ${calControls(seg)}
@@ -437,7 +471,8 @@ function renderMonth(sel, start, weeks, all, loading) {
       ${holidayRows(hol[sel])}
       ${both ? `<div class="banner warn">${I.users}You're both booked this day</div>` : ''}
       ${dayEvents.map((e) => evCard(e)).join('')}
-      ${!dayEvents.length && !loading ? `<div class="empty">Nothing on the calendar.<a class="btn small" href="#/add?date=${sel}">${I.plusSm} Add something</a></div>` : ''}
+      ${!dayEvents.length && !loading ? empty(sel === S.today ? 'Nothing on the calendar today. Enjoy it.' : 'Nothing planned this day.', `<a class="btn small" href="#/add?date=${sel}">${I.plusSm} Add something</a>`) : ''}
+      ${loading ? `<div class="evcard"><i class="sk" style="width:36px;height:36px;border-radius:999px"></i><span class="grow"><i class="sk" style="width:55%;height:14px"></i><i class="sk" style="width:35%;height:11px;margin-top:6px"></i></span></div>` : ''}
     </section>
   </main>${navHtml('month')}`);
 
@@ -474,11 +509,22 @@ function bindViewSwitch(date) {
   on($app, '[data-view]', 'click', (e, el) => {
     S.calView = el.dataset.view;
     localStorage.setItem('st-calview', S.calView);
+    buzz(8);
     location.hash = `#/${S.calView}/${date}`;
   });
 }
 
+function greeting(todayEvents) {
+  const h = new Date().getHours();
+  const part = h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+  if (!todayEvents) return `${part}, ${S.me.name} · Today ›`;
+  const n = todayEvents.length;
+  return `${part}, ${S.me.name} · ${n ? `${n} thing${n === 1 ? '' : 's'} today` : 'nothing today'}`;
+}
+
 function shiftMonth(n) {
+  S.slide = n > 0 ? 'l' : 'r';
+  buzz(8);
   const [y, m] = S.monthSel.split('-').map(Number);
   const target = new Date(Date.UTC(y, m - 1 + n, 1));
   const d = iso(target);
@@ -616,6 +662,8 @@ function renderWeek(anchor, start, events) {
 }
 
 function shiftWeek(n) {
+  S.slide = n > 0 ? 'l' : 'r';
+  buzz(8);
   const d = addDays(S.weekSel, n);
   history.replaceState(null, '', `#/week/${d}`);
   S.base = location.hash;
@@ -626,11 +674,21 @@ function shiftWeek(n) {
 function setScreenKeep(html) {
   const y = window.scrollY;
   $app.innerHTML = html;
+  const scr = $app.querySelector('.screen');
+  if (scr && S.anim) scr.classList.add('anim-' + S.anim);
+  S.anim = null;
+  if (S.slide) {
+    const grid = $app.querySelector('.cal-grid, .wk-cols');
+    if (grid) grid.classList.add('slide-' + S.slide);
+    S.slide = null;
+  }
   window.scrollTo(0, y);
+  updateMinibar();
 }
 
 // ---------------------------------------------------------------- agenda
 async function viewAgenda() {
+  if (!$app.querySelector('.strip')) setScreen(skeleton(5))
   const from = S.today;
   const to = addDays(from, 44);
   const events = await api(`/events?from=${from}&to=${to}`);
@@ -671,7 +729,7 @@ async function viewAgenda() {
       <div style="display:flex;gap:8px;align-items:center"><a class="circle" href="#/search" aria-label="Search" style="color:var(--text)">${I.search}</a><a class="pill amber" href="#/free">${I.heart}Free together</a></div></header>
     ${countdown}
     <div class="strip" role="group" aria-label="Start from day">${strip}</div>
-    ${groups || `<div class="empty">Nothing in the next two weeks. Enjoy the quiet.<a class="btn small" href="#/add">${I.plusSm} Add something</a></div>`}
+    ${groups || empty('Nothing in the next two weeks. Enjoy the quiet.', `<a class="btn small" href="#/add">${I.plusSm} Add something</a>`)}
   </main>${navHtml('agenda')}`);
   on($app, '[data-day]', 'click', (e, el) => { S.agendaFrom = el.dataset.day; viewAgenda().catch(fail); });
   const selBtn = $app.querySelector('.strip [aria-pressed="true"]');
@@ -695,6 +753,7 @@ const presetsFor = (allDay) => REMINDER_PRESETS.filter((k) => !(allDay && timedO
 const extraKinds = (kinds) => kinds.filter((k) => !REMINDER_PRESETS.includes(k));
 
 async function viewEvent(id, date) {
+  if (!$app.querySelector('.catpill')) setScreen(skeleton(3))
   const e = await api(`/events/${id}${isDate(date) ? `?date=${date}` : ''}`);
   const back = `<a class="textbtn" href="#/month/${e.occ_date}" data-back>${I.left}${MON[Number(e.occ_date.slice(5, 7)) - 1]}</a>`;
   if (e.masked) {
@@ -779,6 +838,7 @@ async function viewEvent(id, date) {
   };
   on($app, '[data-react]', 'click', (ev, el) => sendReaction(el.dataset.react));
   $app.querySelector('#react-form').addEventListener('submit', (ev) => { ev.preventDefault(); sendReaction($app.querySelector('#react-text').value.trim()); });
+  if (/[?&]msg=1/.test(location.hash)) setTimeout(() => { const t = $app.querySelector('#react-text'); t.scrollIntoView({ block: 'center' }); t.focus(); }, 250);
 
   let kinds = [...e.my_reminders];
   const saveKinds = async () => {
@@ -1099,6 +1159,7 @@ async function openEventSheet(editId, date, q) {
       }
       S.monthCache = null; S.weekCache = null;
       S.monthSel = f.date;
+      buzz(15);
       toast(editId ? 'Saved' : body.notify_partner && S.partner && f.visibility !== 'private' ? `Saved — ${other} got a heads-up` : 'Saved');
       closeSheet(editId ? `#/event/${savedId}/${f.date}` : `#/${S.calView}/${f.date}`);
     } catch (e2) {
@@ -1153,6 +1214,7 @@ function rangeText(a, b) {
   return ma === mb ? `${ma} ${da}–${db}` : `${ma} ${da} – ${mb} ${db}`;
 }
 async function viewActivity() {
+  if (!$app.querySelector('.recap')) setScreen(skeleton(4))
   const a = await api('/activity');
   S.unread = 0;
   if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
@@ -1195,7 +1257,7 @@ async function viewActivity() {
       <div class="tiles"><div class="tile"><b>${myCount}</b><span>for you</span></div>${other ? `<div class="tile"><b>${theirCount}</b><span>for ${esc(other)}</span></div>` : ''}<a class="tile amber" href="#/free" style="text-decoration:none"><b>${w.free.length}</b><span>free together</span></a></div>
       <p>${esc(recapText)}</p>
     </section>
-    ${Object.entries(groups).filter(([, l]) => l.length).map(([k, l]) => `<section class="section"><h2 class="h2">${k}</h2><div class="card rows">${l.map(item).join('')}</div></section>`).join('') || `<div class="empty">Nothing yet. When ${esc(other || 'someone')} adds plans or sends a message, it shows up here.</div>`}
+    ${Object.entries(groups).filter(([, l]) => l.length).map(([k, l]) => `<section class="section"><h2 class="h2">${k}</h2><div class="card rows">${l.map(item).join('')}</div></section>`).join('') || empty(`Nothing yet. When ${esc(other || 'someone')} adds plans or sends a message, it shows up here.`)}
     <section class="section"><h2 class="h2">Notify me when</h2><div class="card rows">${prefRows.map(([k, l]) => toggleRow('pref-' + k, l, a.prefs[k])).join('')}</div></section>
     <section class="section"><h2 class="h2">Settings</h2><div class="card rows">
       <div class="row" style="flex-wrap:wrap;gap:10px"><span class="grow"><span class="t" id="hol-l">U.S. holidays</span><span class="s">Shown on this phone's calendar</span></span>
@@ -1396,7 +1458,7 @@ async function viewFree(filter = 'any') {
     ${shown.map((s) => `<div class="card" style="display:flex;align-items:center;gap:14px;padding:14px">
       <div style="width:52px;height:56px;flex:none;border-radius:14px;background:var(--warn-bg);color:var(--warn-fg);display:flex;flex-direction:column;align-items:center;justify-content:center"><span style="font-size:11px;font-weight:700;text-transform:uppercase">${DOW[dow(s.date)].slice(0, 3)}</span><span style="font-size:20px;font-weight:800;line-height:1.1">${Number(s.date.slice(8))}</span></div>
       <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px"><span style="font-size:15px;font-weight:700">${esc(title(s))}</span><span class="muted" style="display:flex;align-items:center;gap:5px">${s.weather ? (I.wx[s.weather.icon] || '').replace('width="20" height="20"', 'width="15" height="15"') : ''}${esc(meta(s))}</span></div>
-      <a class="btn small" href="#/add?date=${s.date}&time=${s.kind === 'day' ? '12:00' : s.after > '18:00' ? s.after : '18:30'}&who=both" aria-label="Plan something for ${prettyDate(s.date, true)}">Plan</a></div>`).join('') || '<div class="empty">No shared free time in the next 3 weeks. Busy you two!</div>'}
+      <a class="btn small" href="#/add?date=${s.date}&time=${s.kind === 'day' ? '12:00' : s.after > '18:00' ? s.after : '18:30'}&who=both" aria-label="Plan something for ${prettyDate(s.date, true)}">Plan</a></div>`).join('') || empty('No shared free time in the next 3 weeks. Busy you two!')}
   </main>`);
   on($app, '[data-f]', 'click', (e, el) => viewFree(el.dataset.f).catch(fail));
 }
@@ -1429,13 +1491,130 @@ function viewSearch() {
       const r = await api(`/search?q=${encodeURIComponent(q)}`);
       if (mine !== seq) return;
       const section = (label, list) => (list.length ? `<section class="section"><h2 class="h2">${label}</h2>${list.map(searchCard).join('')}</section>` : '');
-      box.innerHTML = section('Upcoming', r.upcoming) + section('Past', r.past) || `<div class="empty">Nothing matches “${esc(q)}”.</div>`;
+      box.innerHTML = section('Upcoming', r.upcoming) + section('Past', r.past) || empty(`Nothing matches “${esc(q)}”. Try a place, a name or a category.`);
     } catch (err) { fail(err); }
   };
   input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 250); });
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(); input.blur(); } });
   run();
   if (!S.searchQ) setTimeout(() => input.focus(), 100);
+}
+
+// ---------------------------------------------------------------- shrinking header
+const $mini = document.createElement('div');
+$mini.id = 'minibar';
+$mini.setAttribute('aria-hidden', 'true');
+document.body.appendChild($mini);
+function updateMinibar() {
+  const t = $app.querySelector('.screen .title');
+  const show = !!t && !$overlay.innerHTML && t.getBoundingClientRect().bottom < 8;
+  if (show && $mini.textContent !== t.textContent) $mini.textContent = t.textContent;
+  $mini.classList.toggle('show', show);
+}
+window.addEventListener('scroll', updateMinibar, { passive: true });
+
+// ---------------------------------------------------------------- pull to refresh
+const $ptr = document.createElement('div');
+$ptr.id = 'ptr';
+$ptr.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>';
+document.body.appendChild($ptr);
+let ptrStart = null; let ptrDist = 0; let ptrBusy = false;
+document.addEventListener('touchstart', (e) => {
+  if (ptrBusy || window.scrollY > 0 || $overlay.innerHTML || document.querySelector('.dialog') || !$app.querySelector('.screen')) { ptrStart = null; return; }
+  if (e.target.closest('.swipe, .cal, .wk, .strip, input, textarea, select')) { ptrStart = null; return; }
+  ptrStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; ptrDist = 0;
+}, { passive: true });
+document.addEventListener('touchmove', (e) => {
+  if (!ptrStart) return;
+  const dy = e.touches[0].clientY - ptrStart.y;
+  const dx = Math.abs(e.touches[0].clientX - ptrStart.x);
+  if (dy <= 0 || dx > dy) { ptrDist = 0; $ptr.style.transform = ''; $ptr.classList.remove('ready', 'pulling'); return; }
+  ptrDist = Math.min(dy * 0.5, 90);
+  $ptr.style.transform = `translate(-50%, ${ptrDist}px) rotate(${ptrDist * 4}deg)`;
+  $ptr.classList.toggle('ready', ptrDist > 60);
+  $ptr.classList.toggle('pulling', ptrDist > 6);
+}, { passive: true });
+document.addEventListener('touchend', async () => {
+  if (!ptrStart) return;
+  ptrStart = null;
+  if (ptrDist > 60) {
+    ptrBusy = true; buzz(12);
+    $ptr.classList.add('spin');
+    S.monthCache = null; S.weekCache = null;
+    try { await renderBase(location.hash || '#/month'); refreshUnread(); } catch (err) { fail(err); }
+    $ptr.classList.remove('spin'); ptrBusy = false;
+  }
+  $ptr.style.transform = ''; $ptr.classList.remove('ready', 'pulling'); ptrDist = 0;
+});
+
+// ---------------------------------------------------------------- swipe actions + long-press menu on event cards
+let gest = null;
+let suppressClick = false;
+// Swallow the click that follows a swipe/long-press, but never a later, separate tap.
+function suppressNextClick() { suppressClick = true; setTimeout(() => { suppressClick = false; }, 450); }
+$app.addEventListener('touchstart', (e) => {
+  const sw = e.target.closest('.swipe');
+  if (!sw) return;
+  const t = e.touches[0];
+  gest = { sw, card: sw.querySelector('.evcard'), x0: t.clientX, y0: t.clientY, dx: 0, mode: null };
+  gest.timer = setTimeout(() => { if (gest && !gest.mode) { gest.mode = 'press'; suppressNextClick(); buzz(15); cardMenu(sw); } }, 480);
+}, { passive: true });
+$app.addEventListener('touchmove', (e) => {
+  if (!gest) return;
+  const t = e.touches[0];
+  const dx = t.clientX - gest.x0; const dy = t.clientY - gest.y0;
+  if (!gest.mode) {
+    if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.3) { gest.mode = 'swipe'; clearTimeout(gest.timer); }
+    else if (Math.abs(dy) > 8) { clearTimeout(gest.timer); gest = null; return; }
+  }
+  if (gest.mode !== 'swipe') return;
+  if (dx < 0 && gest.sw.dataset.edit !== '1') return; // can't delete someone else's event
+  gest.dx = Math.max(-140, Math.min(140, dx));
+  gest.card.style.transition = 'none';
+  gest.card.style.transform = `translateX(${gest.dx}px)`;
+  gest.sw.classList.toggle('show-dup', gest.dx > 0);
+  gest.sw.classList.toggle('show-del', gest.dx < 0);
+  gest.sw.classList.toggle('armed', Math.abs(gest.dx) > 90);
+}, { passive: true });
+$app.addEventListener('touchend', () => {
+  if (!gest) return;
+  clearTimeout(gest.timer);
+  const g = gest; gest = null;
+  if (g.mode !== 'swipe') return;
+  suppressNextClick();
+  g.card.style.transition = 'transform 0.2s ease-out';
+  g.card.style.transform = '';
+  setTimeout(() => g.sw.classList.remove('show-dup', 'show-del', 'armed'), 200);
+  if (g.dx > 90) { buzz(12); location.hash = `#/add?copy=${g.sw.dataset.id}&date=${g.sw.dataset.occ}`; }
+  else if (g.dx < -90) { buzz(12); confirmDelete(cardEvent(g.sw)); }
+});
+// A swipe or long-press shouldn't also open the event.
+$app.addEventListener('click', (e) => {
+  if (suppressClick && e.target.closest('.swipe')) { e.preventDefault(); e.stopPropagation(); }
+  suppressClick = false;
+}, true);
+$app.addEventListener('contextmenu', (e) => {
+  const sw = e.target.closest('.swipe');
+  if (!sw) return;
+  e.preventDefault();
+  cardMenu(sw);
+});
+function cardEvent(sw) {
+  return { id: Number(sw.dataset.id), occ_date: sw.dataset.occ, date: sw.dataset.date, repeat: sw.dataset.repeat, title: sw.dataset.title };
+}
+function cardMenu(sw) {
+  const ev = cardEvent(sw);
+  const canEdit = sw.dataset.edit === '1';
+  dialog(`<h2 class="h2">${esc(ev.title)}</h2>
+    <a class="btn ghost" href="#/event/${ev.id}/${ev.occ_date}" data-close>Open</a>
+    ${canEdit ? `<a class="btn ghost" href="#/edit/${ev.id}/${ev.occ_date}" data-close>Edit</a>` : ''}
+    <a class="btn ghost" href="#/add?copy=${ev.id}&date=${ev.occ_date}" data-close>${I.copy}Duplicate</a>
+    <a class="btn ghost" href="#/event/${ev.id}/${ev.occ_date}?msg=1" data-close>${I.heart}Send a message</a>
+    ${canEdit ? `<button class="btn ghost" id="cm-del" style="color:var(--danger)">${I.trash}Delete</button>` : ''}
+    <button class="btn ghost" data-close style="box-shadow:none">Cancel</button>`, (w, close) => {
+    const d = w.querySelector('#cm-del');
+    if (d) d.addEventListener('click', () => { close(); confirmDelete(ev); });
+  });
 }
 
 // ---------------------------------------------------------------- start
