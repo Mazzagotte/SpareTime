@@ -10,6 +10,7 @@ import { forecast, weatherFor } from './weather.js';
 
 const REPEATS = ['none', 'daily', 'weekly', 'biweekly', 'monthly', 'yearly'];
 const MAX_SPAN_DAYS = 31;
+const MAX_REMINDER_MIN = 43200; // 30 days
 const VISIBILITY = ['shared', 'busy', 'private'];
 const REMINDER_WORDS = ['night', 'morning', 'hour'];
 const OTHER = { id: null, name: 'Other', color: '#6B7280' };
@@ -137,7 +138,7 @@ function cleanKinds(kinds) {
   const out = [];
   for (const k of kinds) {
     if (REMINDER_WORDS.includes(k) && !out.includes(k)) out.push(k);
-    else if (Number.isInteger(k) && k > 0 && k <= 10080 && !out.includes(k)) out.push(k);
+    else if (Number.isInteger(k) && k > 0 && k <= MAX_REMINDER_MIN && !out.includes(k)) out.push(k);
   }
   return out.slice(0, 6);
 }
@@ -394,14 +395,14 @@ export async function handleApi(request, env, ctx) {
     ).bind(e.owner_id, e.category_id, e.title, e.date, e.end_date, e.start_time, e.end_time, e.all_day, e.location, e.notes,
       e.repeat, e.repeat_until, e.visibility, e.notify_partner, me.id).run();
     const id = r.meta.last_row_id;
-    const kinds = cleanKinds(b.reminders || ['night', 'hour']);
+    const kinds = cleanKinds(b.reminders || ['night']);
     if (e.owner_id == null) {
       for (const p of ppl) await setKinds(env, id, p.id, kinds);
     } else if (e.owner_id === me.id) {
       await setKinds(env, id, me.id, kinds);
       if (partner && b.partner_night && e.visibility !== 'private') await setKinds(env, id, partner.id, ['night']);
     } else {
-      await setKinds(env, id, e.owner_id, ['night', 'hour']);
+      await setKinds(env, id, e.owner_id, ['night']);
     }
     const ev = await loadEvent(env, id);
     if (e.notify_partner && e.visibility !== 'private') {

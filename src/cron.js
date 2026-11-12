@@ -39,13 +39,12 @@ export async function runCron(env, ctx, now = Date.now()) {
   if (!ppl.length) return;
   const nameOf = (id) => (ppl.find((p) => p.id === id) || {}).name || 'Someone';
 
-  const occ = await loadOcc(env, addDays(today, -1), addDays(today, 2));
+  // Look 32 days ahead so reminders set up to a month before an event still fire.
+  const occ = await loadOcc(env, addDays(today, -1), addDays(today, 32));
 
   // ---- per-event reminders ----
-  const ids = [...new Set(occ.map((o) => o.ev.id))];
-  const remRows = ids.length
-    ? (await env.DB.prepare(`SELECT * FROM event_reminders WHERE event_id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results
-    : [];
+  // Two people's reminder settings are a small table — load it whole (D1 caps bound parameters at 100).
+  const remRows = occ.length ? (await env.DB.prepare('SELECT * FROM event_reminders').all()).results : [];
   for (const { ev, date } of occ) {
     const start = ev.all_day ? '09:00' : ev.start_time || '09:00';
     const startAt = zonedToUtc(tz, date, start);
@@ -57,7 +56,12 @@ export async function runCron(env, ctx, now = Date.now()) {
         if (kind === 'night') { fireAt = zonedToUtc(tz, addDays(date, -1), '20:00'); lead = 'Tomorrow'; }
         else if (kind === 'morning') { fireAt = zonedToUtc(tz, date, '08:00'); lead = 'Today'; }
         else if (kind === 'hour') { if (ev.all_day) continue; fireAt = startAt - 3600000; lead = 'In 1 hour'; }
-        else if (typeof kind === 'number') { if (ev.all_day) continue; fireAt = startAt - kind * 60000; lead = kind < 60 ? `In ${kind} min` : `In ${Math.round(kind / 60)} hr`; }
+        else if (typeof kind === 'number') {
+          if (ev.all_day && kind < 1440) continue; // all-day events: day/week reminders only (counted from 9 AM)
+          fireAt = startAt - kind * 60000;
+          lead = kind < 60 ? `In ${kind} min` : kind < 1440 ? `In ${kind % 60 ? (kind / 60).toFixed(1) : kind / 60} hr`
+            : kind === 1440 ? 'Tomorrow' : kind === 43200 ? 'In 1 month' : kind % 10080 === 0 ? `In ${kind / 10080} week${kind > 10080 ? 's' : ''}` : `In ${Math.round(kind / 1440)} days`;
+        }
         else continue;
         if (!due(fireAt, now)) continue;
         if (!(await claim(env, `rem:${ev.id}:${date}:${uid}:${kind}`))) continue;

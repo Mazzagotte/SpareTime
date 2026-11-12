@@ -493,7 +493,19 @@ async function viewAgenda() {
 
 // ---------------------------------------------------------------- event detail
 const KIND_LABELS = { night: 'Night before', morning: 'Morning of', hour: '1 hour before' };
-const kindLabel = (k) => KIND_LABELS[k] || (k < 60 ? `${k} min before` : `${Math.round(k / 60)} hr before`);
+function kindLabel(k) {
+  if (KIND_LABELS[k]) return KIND_LABELS[k];
+  if (k < 60) return `${k} min before`;
+  if (k < 1440) return `${k % 60 ? (k / 60).toFixed(1) : k / 60} hr before`;
+  if (k === 43200) return '1 month before';
+  if (k % 10080 === 0) return `${k / 10080} week${k > 10080 ? 's' : ''} before`;
+  return `${Math.round(k / 1440)} day${k >= 2880 ? 's' : ''} before`;
+}
+// One-tap reminder choices, nearest first. Anything else is under "Custom".
+const REMINDER_PRESETS = ['morning', 'night', 4320, 10080, 20160, 43200];
+const timedOnly = (k) => k === 'hour' || (typeof k === 'number' && k < 1440);
+const presetsFor = (allDay) => REMINDER_PRESETS.filter((k) => !(allDay && timedOnly(k)));
+const extraKinds = (kinds) => kinds.filter((k) => !REMINDER_PRESETS.includes(k));
 
 async function viewEvent(id, date) {
   const e = await api(`/events/${id}${isDate(date) ? `?date=${date}` : ''}`);
@@ -545,8 +557,8 @@ async function viewEvent(id, date) {
     </section>
 
     <section class="section"><h2 class="h2">Remind me</h2>
-      <div class="chips">${['night', 'morning', 'hour'].map((k) => `<button class="chip solid" data-kind="${k}" aria-pressed="${e.my_reminders.includes(k)}">${kindLabel(k)}</button>`).join('')}
-      ${e.my_reminders.filter((k) => typeof k === 'number').map((k) => `<button class="chip solid" data-kind="${k}" aria-pressed="true">${kindLabel(k)}</button>`).join('')}
+      <div class="chips">${presetsFor(e.all_day).map((k) => `<button class="chip solid" data-kind="${k}" aria-pressed="${e.my_reminders.includes(k)}">${kindLabel(k)}</button>`).join('')}
+      ${extraKinds(e.my_reminders).map((k) => `<button class="chip solid" data-kind="${k}" aria-pressed="true">${kindLabel(k)}</button>`).join('')}
       <button class="chip dashed" data-custom>${I.plusSm}Custom</button></div>
     </section>
 
@@ -592,7 +604,7 @@ async function viewEvent(id, date) {
     saveKinds();
   });
   const custom = $app.querySelector('[data-custom]');
-  if (custom) custom.addEventListener('click', () => askMinutes(async (mins) => { kinds = [...kinds, mins]; await saveKinds(); viewEvent(e.id, e.occ_date); }));
+  if (custom) custom.addEventListener('click', () => askMinutes(async (mins) => { kinds = [...kinds, mins]; await saveKinds(); viewEvent(e.id, e.occ_date); }, e.all_day));
 
   bindToggle('hu-notify', (v) => api(`/events/${e.id}/heads-up`, { method: 'PUT', body: { notify_partner: v } }));
   bindToggle('hu-night', (v) => api(`/events/${e.id}/heads-up`, { method: 'PUT', body: { partner_night: v } }));
@@ -633,9 +645,9 @@ function dialog(html, bind) {
   return close;
 }
 
-function askMinutes(done) {
+function askMinutes(done, allDay = false) {
   dialog(`<h2 class="h2">Custom reminder</h2>
-    <div class="chips">${[15, 30, 90, 120, 180].map((m) => `<button class="chip" data-m="${m}">${m < 60 ? m + ' min' : m / 60 + ' hr'} before</button>`).join('')}</div>
+    <div class="chips">${(allDay ? [1440, 2880, 7200, 30240] : [30, 60, 120, 1440, 2880, 30240]).map((m) => `<button class="chip" data-m="${m}">${kindLabel(m)}</button>`).join('')}</div>
     <button class="btn ghost" data-close>Cancel</button>`, (w, close) => {
     w.querySelectorAll('[data-m]').forEach((b) => b.addEventListener('click', () => { close(); done(Number(b.dataset.m)); }));
   });
@@ -660,7 +672,6 @@ function confirmDelete(e) {
 }
 
 // ---------------------------------------------------------------- add / edit sheet
-const REMINDER_OPTS = ['night', 'morning', 'hour'];
 const SWATCHES = ['#2563EB', '#7C3AED', '#2F7D4A', '#0E7490', '#BE185D', '#B45309', '#C2410C', '#4F46E5', '#0F766E', '#475569', '#A21CAF', '#9F1239'];
 
 function ownerKey(ownerId) { return ownerId == null ? 'both' : ownerId === S.me.id ? 'me' : 'partner'; }
@@ -689,7 +700,7 @@ async function openEventSheet(editId, date, q) {
     const who = ['me', 'partner', 'both'].includes(q.get('who')) ? q.get('who') : 'me';
     f = {
       title: '', owner: who, category_id: null, all_day: false, date: d, multi: false, end_date: '', start_time: q.get('time') || '18:00', end_time: '',
-      repeat: 'none', repeat_until: '', location: '', notes: '', reminders: ['night', 'hour'], visibility: 'shared',
+      repeat: 'none', repeat_until: '', location: '', notes: '', reminders: ['night'], visibility: 'shared',
       notify_partner: true, partner_night: false,
     };
     if (who === 'both') { const dn = S.cats.find((c) => c.owner_id == null && /date/i.test(c.name)); if (dn) f.category_id = dn.id; }
@@ -742,7 +753,7 @@ async function openEventSheet(editId, date, q) {
       </div>
       <div class="field"><label class="lbl" for="f-where">Where</label><input class="input" id="f-where" maxlength="160" placeholder="Bowling center or field" value="${esc(f.location)}"></div>
       <div class="field"><label class="lbl" for="f-notes">Notes</label><textarea class="input" id="f-notes" maxlength="2000" placeholder="Lane assignments, what to bring…">${esc(f.notes)}</textarea></div>
-      <div class="field"><span class="lbl" id="rem-l">Remind me</span><div class="chips" role="group" aria-labelledby="rem-l">${REMINDER_OPTS.map((k) => `<button type="button" class="chip solid" data-rem="${k}" aria-pressed="${f.reminders.includes(k)}">${kindLabel(k)}</button>`).join('')}${f.reminders.filter((k) => typeof k === 'number').map((k) => `<button type="button" class="chip solid" data-rem="${k}" aria-pressed="true">${kindLabel(k)}</button>`).join('')}</div></div>
+      <div class="field"><span class="lbl" id="rem-l">Remind me</span><div class="chips" role="group" aria-labelledby="rem-l">${presetsFor(f.all_day).map((k) => `<button type="button" class="chip solid" data-rem="${k}" aria-pressed="${f.reminders.includes(k)}">${kindLabel(k)}</button>`).join('')}${extraKinds(f.reminders).map((k) => `<button type="button" class="chip solid" data-rem="${k}" aria-pressed="true">${kindLabel(k)}</button>`).join('')}<button type="button" class="chip dashed" id="rem-custom">${I.plusSm}Custom</button></div></div>
       ${mine && S.partner ? `<div class="field"><span class="lbl" id="vis-l">Who can see it</span><div class="seg" role="group" aria-labelledby="vis-l">${[['shared', 'Shared'], ['busy', 'Busy only'], ['private', 'Private']].map(([k, l]) => `<button type="button" data-vis="${k}" aria-pressed="${f.visibility === k}">${l}</button>`).join('')}</div><span class="muted">${esc(visHelp)}</span></div>` : ''}
       ${S.partner && f.visibility !== 'private' ? `<div class="card rows">${toggleRow('f-notify', f.owner === 'both' ? `Let ${other} know` : f.owner === 'partner' ? `Let ${other} know you added it` : `Let ${other} know`, f.notify_partner, 'Sends a notification when you save')}
         ${mine ? toggleRow('f-pnight', `Remind ${other} the night before`, f.partner_night) : ''}</div>` : ''}`;
@@ -769,6 +780,8 @@ async function openEventSheet(editId, date, q) {
       f.reminders = f.reminders.includes(k) ? f.reminders.filter((x) => x !== k) : [...f.reminders, k];
       el.setAttribute('aria-pressed', String(f.reminders.includes(k)));
     });
+    const rc = fields.querySelector('#rem-custom');
+    if (rc) rc.addEventListener('click', () => askMinutes((mins) => { if (!f.reminders.includes(mins)) f.reminders = [...f.reminders, mins]; render(); }, f.all_day));
     const nc = fields.querySelector('#new-cat');
     if (nc) nc.addEventListener('click', () => { addingCat = !addingCat; render(); if (addingCat) fields.querySelector('#nc-name').focus(); });
     on(fields, '[data-sw]', 'click', (e, el) => { newCatColor = el.dataset.sw; fields.querySelectorAll('[data-sw]').forEach((b) => b.setAttribute('aria-pressed', String(b === el))); });
