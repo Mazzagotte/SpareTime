@@ -34,9 +34,17 @@ function prettyTime(t) {
   return `${h % 12 === 0 ? 12 : h % 12}:${pad(m)} ${h >= 12 ? 'PM' : 'AM'}`;
 }
 function timeText(e) {
+  if (e.span > 1) return `${prettyDate(e.occ_date)} – ${prettyDate(e.end_date)}`;
   if (e.all_day) return 'All day';
   return e.end_time ? `${prettyTime(e.start_time)} – ${prettyTime(e.end_time)}` : prettyTime(e.start_time);
 }
+// For one day of a multi-day event: "Day 2 of 3 · ends 6:00 PM".
+function spanText(e) {
+  const last = e.day_index === e.span - 1;
+  const t = e.all_day ? '' : e.day_index === 0 && e.start_time ? ` · starts ${prettyTime(e.start_time)}` : last && e.end_time ? ` · ends ${prettyTime(e.end_time)}` : '';
+  return `Day ${e.day_index + 1} of ${e.span}${t}`;
+}
+const dayOf = (e) => e.day || e.occ_date;
 function relDay(d) {
   const n = daysBetween(S.today, d);
   if (n === 0) return 'Today';
@@ -74,6 +82,7 @@ const I = {
   import: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>',
   check: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
   share: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="m16 6-4-4-4 4"/><path d="M12 2v13"/></svg>',
+  search: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
   flag: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 22V4"/><path d="M4 4h13l-2 4 2 4H4"/></svg>',
   car: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 17h14v-5l-2-5H7l-2 5z"/><circle cx="7.5" cy="17.5" r="1.5"/><circle cx="16.5" cy="17.5" r="1.5"/></svg>',
   wx: {
@@ -136,10 +145,13 @@ function avatar(e, cls = '') {
 }
 
 function evCard(e, { showTime = false } = {}) {
+  const multi = e.span > 1;
+  const when = multi ? spanText(e) : timeText(e);
   const meta = e.masked
     ? `${e.owner_name} · Private`
-    : [showTime ? null : timeText(e), e.owner_name, e.category.name !== 'Other' ? e.category.name : null].filter(Boolean).join(' · ');
-  const inner = `${avatar(e)}<span class="grow"><span class="t">${esc(e.title)}</span><span class="s">${esc(meta)}</span></span>${showTime ? `<span class="time">${esc(e.all_day ? 'All day' : prettyTime(e.start_time))}</span>` : `<span style="color:var(--muted)">${I.right}</span>`}`;
+    : [showTime && !multi ? null : when, e.owner_name, e.category.name !== 'Other' ? e.category.name : null].filter(Boolean).join(' · ');
+  const right = multi ? `${e.day_index + 1}/${e.span}` : e.all_day ? 'All day' : prettyTime(e.start_time);
+  const inner = `${avatar(e)}<span class="grow"><span class="t">${esc(e.title)}</span><span class="s">${esc(meta)}</span></span>${showTime ? `<span class="time">${esc(right)}</span>` : `<span style="color:var(--muted)">${I.right}</span>`}`;
   if (e.masked) return `<div class="evcard">${inner}</div>`;
   return `<a class="evcard" href="#/event/${e.id}/${e.occ_date}">${inner}</a>`;
 }
@@ -198,6 +210,7 @@ async function doRoute() {
   }
   $overlay.innerHTML = '';
   S.sheetPushed = false;
+  if (view === 'search' && S.base && !S.base.startsWith('#/search') && !S.base.startsWith('#/event')) S.searchBack = S.base;
   S.base = location.hash || '#/month';
   return renderBase(S.base);
 }
@@ -211,6 +224,7 @@ async function renderBase(hash) {
     case 'activity': return viewActivity();
     case 'categories': return viewCategories();
     case 'free': return viewFree();
+    case 'search': return viewSearch();
     default: return viewMonth(isDate(a) ? a : null);
   }
 }
@@ -345,7 +359,7 @@ function renderMonth(sel, start, weeks, all, loading) {
   const events = filterEvents(all);
   const month = sel.slice(0, 7);
   const byDay = {};
-  for (const e of events) (byDay[e.occ_date] ||= []).push(e);
+  for (const e of events) (byDay[dayOf(e)] ||= []).push(e);
   const hol = holidaysBetween(start, addDays(start, weeks * 7 - 1), S.holidays);
   const yr = sel.slice(0, 4) !== S.today.slice(0, 4) ? ` ${sel.slice(0, 4)}` : '';
   let cells = '';
@@ -356,7 +370,13 @@ function renderMonth(sel, start, weeks, all, loading) {
     const h = hol[d] || [];
     const room = h.length ? 1 : 2;
     const bars = (h.length ? `<span class="bar holiday">${esc(h[0].name.replace(' (observed)', ''))}</span>` : '')
-      + evs.slice(0, room).map((e) => `<span class="bar" style="background:${esc(e.category.color)}">${esc(e.masked ? 'Busy' : e.title)}</span>`).join('');
+      + evs.slice(0, room).map((e) => {
+        if (!(e.span > 1)) return `<span class="bar" style="background:${esc(e.category.color)}">${esc(e.masked ? 'Busy' : e.title)}</span>`;
+        const wd = dow(d);
+        const cls = [e.day_index > 0 && wd !== 0 && 'cont-l', e.day_index < e.span - 1 && wd !== 6 && 'cont-r'].filter(Boolean).join(' ');
+        const label = e.day_index === 0 || wd === 0 ? (e.masked ? 'Busy' : e.title) : '\u00a0';
+        return `<span class="bar ${cls}" style="background:${esc(e.category.color)}">${esc(label)}</span>`;
+      }).join('');
     const more = evs.length > room ? `<span class="more">+${evs.length - room}</span>` : '';
     cells += `<button class="${cls}" data-date="${d}" aria-label="${prettyDate(d, true)}${h.length ? ', ' + esc(h.map((x) => x.name).join(', ')) : ''}, ${evs.length} event${evs.length === 1 ? '' : 's'}${d === S.today ? ', today' : ''}"><span class="n">${Number(d.slice(8))}</span>${bars}${more}</button>`;
   }
@@ -367,7 +387,7 @@ function renderMonth(sel, start, weeks, all, loading) {
   setScreenKeep(`<main class="screen">
     <header class="head">
       <div><p class="kicker"><img src="/icons/mark.png" alt="">${esc(S.people.map((p) => p.name).join(' & '))}</p><h1 class="title">${MON[Number(sel.slice(5, 7)) - 1]}${yr}</h1></div>
-      <div style="display:flex;gap:8px"><button class="circle" data-nav="-1" aria-label="Previous month">${I.left}</button><button class="circle" data-nav="1" aria-label="Next month">${I.right}</button></div>
+      <div style="display:flex;gap:8px"><a class="circle" href="#/search" aria-label="Search" style="color:var(--text)">${I.search}</a><button class="circle" data-nav="-1" aria-label="Previous month">${I.left}</button><button class="circle" data-nav="1" aria-label="Next month">${I.right}</button></div>
     </header>
     <div class="seg" role="group" aria-label="Whose events to show">${seg.map(([k, l]) => `<button data-filter="${k}" aria-pressed="${S.filter === k}">${esc(l)}</button>`).join('')}</div>
     <section class="cal" aria-label="${MON[Number(sel.slice(5, 7)) - 1]} calendar" ${loading ? 'aria-busy="true"' : ''}>
@@ -429,11 +449,11 @@ async function viewAgenda() {
   const events = await api(`/events?from=${from}&to=${to}`);
   const start = S.agendaFrom && S.agendaFrom >= from ? S.agendaFrom : from;
   const byDay = {};
-  for (const e of events) (byDay[e.occ_date] ||= []).push(e);
+  for (const e of events) (byDay[dayOf(e)] ||= []).push(e);
   const hol = holidaysBetween(from, to, S.holidays);
 
   const upcoming = events.filter((e) => !e.masked && (e.occ_date > from || (!e.all_day && e.start_time)));
-  const big = upcoming.find((e) => /tourn|tourney|game|ump/i.test(e.title) && e.occ_date > from) || null;
+  const big = upcoming.find((e) => /tourn|tourney|game|ump|trip/i.test(e.title) && e.occ_date > from && !(e.day_index > 0)) || null;
   let countdown = '';
   if (big) {
     const n = daysBetween(from, big.occ_date);
@@ -461,7 +481,7 @@ async function viewAgenda() {
 
   setScreen(`<main class="screen">
     <header class="head"><div><p class="kicker">Next two weeks</p><h1 class="title">Coming up</h1></div>
-      <a class="pill amber" href="#/free">${I.heart}Free together</a></header>
+      <div style="display:flex;gap:8px;align-items:center"><a class="circle" href="#/search" aria-label="Search" style="color:var(--text)">${I.search}</a><a class="pill amber" href="#/free">${I.heart}Free together</a></div></header>
     ${countdown}
     <div class="strip" role="group" aria-label="Start from day">${strip}</div>
     ${groups || `<div class="empty">Nothing in the next two weeks. Enjoy the quiet.<a class="btn small" href="#/add">${I.plusSm} Add something</a></div>`}
@@ -480,14 +500,19 @@ async function viewEvent(id, date) {
   const back = `<a class="textbtn" href="#/month/${e.occ_date}" data-back>${I.left}${MON[Number(e.occ_date.slice(5, 7)) - 1]}</a>`;
   if (e.masked) {
     setScreen(`<main class="screen no-nav"><div class="topbar">${back}</div>
-      <h1 class="title">Busy</h1><p class="muted">${esc(e.owner_name)} marked this time as busy. ${esc(prettyDate(e.occ_date, true))} · ${esc(timeText(e))}</p></main>`);
+      <h1 class="title">Busy</h1><p class="muted">${esc(e.owner_name)} marked this time as busy. ${esc(e.span > 1 ? '' : prettyDate(e.occ_date, true) + ' · ')}${esc(timeText(e))}</p></main>`);
     return bindBack();
   }
   const mine = e.owner_id === S.me.id;
   const other = S.partner ? S.partner.name : 'them';
   const dirs = e.location ? (isIOS ? `https://maps.apple.com/?q=${encodeURIComponent(e.location)}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(e.location)}`) : null;
   const wx = e.weather;
-  const repeatText = { daily: 'Repeats every day', weekly: 'Repeats every week', biweekly: 'Repeats every 2 weeks', monthly: 'Repeats every month' }[e.repeat];
+  const repeatText = { daily: 'Repeats every day', weekly: 'Repeats every week', biweekly: 'Repeats every 2 weeks', monthly: 'Repeats every month', yearly: 'Repeats every year' }[e.repeat];
+  const multi = e.span > 1;
+  const whenTitle = multi ? `${prettyDate(e.occ_date)} – ${prettyDate(e.end_date)}` : prettyDate(e.occ_date, true);
+  const whenSub = multi
+    ? [e.all_day ? `${e.span} days` : null, !e.all_day && e.start_time ? `Starts ${prettyTime(e.start_time)}` : null, !e.all_day && e.end_time ? `ends ${prettyTime(e.end_time)}` : null, e.all_day ? null : `${e.span} days`].filter(Boolean).join(' · ')
+    : timeText(e);
   const myStatus = (e.statuses.find((s) => s.user_id === S.me.id) || {}).status;
   const theirStatus = e.statuses.filter((s) => s.user_id !== S.me.id);
   const replies = mine ? ['Thank you!', 'Love you', 'Wish me luck'] : ['Good luck!', 'Have fun', 'Proud of you', 'Love you'];
@@ -501,7 +526,7 @@ async function viewEvent(id, date) {
       ${e.visibility !== 'shared' && mine ? `<p class="muted">${e.visibility === 'busy' ? `${esc(other)} sees this as “Busy”` : 'Only you can see this'}</p>` : ''}
     </div>
     <div class="card rows">
-      <div class="row">${I.clock}<span class="grow"><span class="t">${prettyDate(e.occ_date, true)}</span><span class="s">${esc(timeText(e))}${repeatText ? ` · ${repeatText}` : ''}</span></span></div>
+      <div class="row">${I.clock}<span class="grow"><span class="t">${esc(whenTitle)}</span><span class="s">${esc(whenSub)}${repeatText ? ` · ${repeatText}` : ''}</span></span></div>
       ${wx ? `<div class="row" style="color:var(--sub)">${I.wx[wx.icon] || I.wx.cloud}<span class="grow"><span class="t" style="color:var(--text)">${esc(wx.text)} · ${wx.temp != null ? wx.temp : wx.high}°</span><span class="s">${wx.temp != null ? `Forecast at ${prettyTime(e.start_time)} in ${esc(wx.place)}` : `High ${wx.high}° · Low ${wx.low}° in ${esc(wx.place)}`}${wx.precip >= 30 ? ` · ${wx.precip}% chance of precipitation` : ''}</span></span></div>` : ''}
       ${e.location ? `<a class="row" href="${dirs}" target="_blank" rel="noopener">${I.pin}<span class="grow"><span class="t">${esc(e.location)}</span><span class="s" style="color:var(--link);font-weight:600">Get directions</span></span></a>` : ''}
       ${e.notes ? `<div class="row" style="align-items:flex-start">${I.note}<span class="grow"><span class="s" style="color:var(--text);white-space:pre-wrap;font-size:15px">${esc(e.notes)}</span></span></div>` : ''}
@@ -653,6 +678,7 @@ async function openEventSheet(editId, date, q) {
     const e = await api(`/events/${editId}${isDate(date) ? `?date=${date}` : ''}`);
     f = {
       title: e.title, owner: ownerKey(e.owner_id), category_id: e.category.id, all_day: e.all_day, date: e.date,
+      multi: !!e.series_end_date, end_date: e.series_end_date || '',
       start_time: e.start_time || '', end_time: e.end_time || '', repeat: e.repeat, repeat_until: e.repeat_until || '',
       location: e.location || '', notes: e.notes || '', reminders: e.my_reminders, visibility: e.visibility,
       notify_partner: e.heads_up ? e.heads_up.notify_partner : true, partner_night: e.heads_up ? e.heads_up.partner_night : false,
@@ -662,7 +688,7 @@ async function openEventSheet(editId, date, q) {
     const d = isDate(q.get('date')) ? q.get('date') : (S.monthSel && S.monthSel >= S.today ? S.monthSel : S.today);
     const who = ['me', 'partner', 'both'].includes(q.get('who')) ? q.get('who') : 'me';
     f = {
-      title: '', owner: who, category_id: null, all_day: false, date: d, start_time: q.get('time') || '18:00', end_time: '',
+      title: '', owner: who, category_id: null, all_day: false, date: d, multi: false, end_date: '', start_time: q.get('time') || '18:00', end_time: '',
       repeat: 'none', repeat_until: '', location: '', notes: '', reminders: ['night', 'hour'], visibility: 'shared',
       notify_partner: true, partner_night: false,
     };
@@ -706,10 +732,12 @@ async function openEventSheet(editId, date, q) {
         <button type="button" class="btn small" id="nc-add" style="align-self:flex-start">Add category</button></div>` : ''}</div>
       <div class="card rows pickers">
         ${toggleRow('f-allday', 'All day', f.all_day)}
-        <div class="prow"><label for="f-date" style="font-size:15px;font-weight:500">${f.repeat !== 'none' ? 'Starting' : 'Date'}</label><input type="date" id="f-date" value="${esc(f.date)}" required></div>
-        ${f.all_day ? '' : `<div class="prow"><label for="f-start" style="font-size:15px;font-weight:500">Starts</label><input type="time" id="f-start" value="${esc(f.start_time)}"></div>
-        <div class="prow"><label for="f-end" style="font-size:15px;font-weight:500">Ends <span class="muted">(optional)</span></label><input type="time" id="f-end" value="${esc(f.end_time)}"></div>`}
-        <div class="prow"><label for="f-repeat" style="font-size:15px;font-weight:500">Repeats</label><select id="f-repeat">${[['none', 'Never'], ['daily', 'Every day'], ['weekly', 'Every week'], ['biweekly', 'Every 2 weeks'], ['monthly', 'Every month']].map(([k, l]) => `<option value="${k}" ${f.repeat === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        ${toggleRow('f-multi', 'Multiple days', f.multi)}
+        <div class="prow"><label for="f-date" style="font-size:15px;font-weight:500">${f.multi ? 'First day' : f.repeat !== 'none' ? 'Starting' : 'Date'}</label><input type="date" id="f-date" value="${esc(f.date)}" required></div>
+        ${f.multi ? `<div class="prow"><label for="f-enddate" style="font-size:15px;font-weight:500">Last day</label><input type="date" id="f-enddate" value="${esc(f.end_date)}" min="${esc(addDays(f.date, 1))}"></div>` : ''}
+        ${f.all_day ? '' : `<div class="prow"><label for="f-start" style="font-size:15px;font-weight:500">Starts${f.multi ? ' <span class="muted">(first day)</span>' : ''}</label><input type="time" id="f-start" value="${esc(f.start_time)}"></div>
+        <div class="prow"><label for="f-end" style="font-size:15px;font-weight:500">Ends <span class="muted">${f.multi ? '(last day)' : '(optional)'}</span></label><input type="time" id="f-end" value="${esc(f.end_time)}"></div>`}
+        <div class="prow"><label for="f-repeat" style="font-size:15px;font-weight:500">Repeats</label><select id="f-repeat">${[['none', 'Never'], ...(f.multi ? [] : [['daily', 'Every day']]), ['weekly', 'Every week'], ['biweekly', 'Every 2 weeks'], ['monthly', 'Every month'], ['yearly', 'Every year']].map(([k, l]) => `<option value="${k}" ${f.repeat === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
         ${f.repeat !== 'none' ? `<div class="prow"><label for="f-until" style="font-size:15px;font-weight:500">Until <span class="muted">(optional)</span></label><input type="date" id="f-until" value="${esc(f.repeat_until)}"></div>` : ''}
       </div>
       <div class="field"><label class="lbl" for="f-where">Where</label><input class="input" id="f-where" maxlength="160" placeholder="Bowling center or field" value="${esc(f.location)}"></div>
@@ -722,7 +750,11 @@ async function openEventSheet(editId, date, q) {
 
     const val = (id) => { const el = fields.querySelector('#' + id); return el ? el.value : ''; };
     fields.querySelector('#f-title').addEventListener('input', (e) => { f.title = e.target.value; });
-    fields.querySelector('#f-date').addEventListener('change', (e) => { f.date = e.target.value; });
+    fields.querySelector('#f-date').addEventListener('change', (e) => {
+      f.date = e.target.value;
+      if (f.multi && (!f.end_date || f.end_date <= f.date)) { f.end_date = addDays(f.date, 1); render(); }
+    });
+    const ed = fields.querySelector('#f-enddate'); if (ed) ed.addEventListener('change', () => { f.end_date = val('f-enddate'); });
     const st = fields.querySelector('#f-start'); if (st) st.addEventListener('change', () => { f.start_time = val('f-start'); });
     const en = fields.querySelector('#f-end'); if (en) en.addEventListener('change', () => { f.end_time = val('f-end'); });
     fields.querySelector('#f-repeat').addEventListener('change', (e) => { f.repeat = e.target.value; render(); });
@@ -753,6 +785,12 @@ async function openEventSheet(editId, date, q) {
       } catch (err) { fail(err); }
     });
     bindToggle('f-allday', async (v) => { f.all_day = v; render(); }, fields);
+    bindToggle('f-multi', async (v) => {
+      f.multi = v;
+      if (v && (!f.end_date || f.end_date <= f.date)) f.end_date = addDays(f.date, 2);
+      if (v && f.repeat === 'daily') f.repeat = 'none';
+      render();
+    }, fields);
     bindToggle('f-notify', async (v) => { f.notify_partner = v; updateSave(); }, fields);
     bindToggle('f-pnight', async (v) => { f.partner_night = v; }, fields);
   }
@@ -774,6 +812,8 @@ async function openEventSheet(editId, date, q) {
       if (p.owner) f.owner = p.owner;
       if (p.category_id) f.category_id = p.category_id;
       if (p.date) f.date = p.date;
+      f.multi = !!p.end_date;
+      f.end_date = p.end_date || '';
       f.all_day = p.all_day;
       if (p.start_time) f.start_time = p.start_time;
       if (p.end_time) f.end_time = p.end_time;
@@ -783,7 +823,8 @@ async function openEventSheet(editId, date, q) {
       const bits = [
         [f.title, cat ? cat.color : 'var(--muted)'],
         [f.owner === 'both' ? 'Both of us' : (f.owner === 'me' ? S.me : S.partner || S.me).name, 'var(--muted)'],
-        [p.repeat !== 'none' ? { daily: 'Every day', weekly: `Every ${DOW[dow(f.date)].slice(0, 3)}`, biweekly: `Every other ${DOW[dow(f.date)].slice(0, 3)}`, monthly: 'Every month' }[p.repeat] : relDay(f.date), 'var(--muted)'],
+        [p.end_date ? `${prettyDate(f.date)} – ${prettyDate(p.end_date)}` : null, 'var(--muted)'],
+        [p.repeat !== 'none' ? { daily: 'Every day', weekly: `Every ${DOW[dow(f.date)].slice(0, 3)}`, biweekly: `Every other ${DOW[dow(f.date)].slice(0, 3)}`, monthly: 'Every month', yearly: `Every year on ${MON[Number(f.date.slice(5, 7)) - 1].slice(0, 3)} ${Number(f.date.slice(8))}` }[p.repeat] : p.end_date ? null : relDay(f.date), 'var(--muted)'],
         [p.all_day ? 'All day' : p.start_time ? prettyTime(p.start_time) + (p.end_time ? ` – ${prettyTime(p.end_time)}` : '') : null, 'var(--muted)'],
       ].filter((b) => b[0]);
       box.hidden = false;
@@ -800,11 +841,13 @@ async function openEventSheet(editId, date, q) {
     err.hidden = true;
     const body = {
       title: f.title, owner_id: ownerId(f.owner), category_id: f.category_id, all_day: f.all_day, date: f.date,
+      end_date: f.multi ? f.end_date : null,
       start_time: f.all_day ? null : f.start_time, end_time: f.all_day ? null : f.end_time || null,
       repeat: f.repeat, repeat_until: f.repeat_until || null, location: f.location, notes: f.notes,
       reminders: f.reminders, visibility: f.visibility, notify_partner: f.notify_partner, partner_night: f.partner_night,
     };
-    if (body.end_time && body.start_time && body.end_time <= body.start_time) { err.textContent = 'The end time is before the start'; err.hidden = false; return; }
+    if (f.multi && !(f.end_date > f.date)) { err.textContent = 'Pick a last day after the first day'; err.hidden = false; return; }
+    if (!f.multi && body.end_time && body.start_time && body.end_time <= body.start_time) { err.textContent = 'The end time is before the start'; err.hidden = false; return; }
     const btn = $overlay.querySelector('#save');
     btn.disabled = true;
     try {
@@ -1067,6 +1110,43 @@ async function viewFree(filter = 'any') {
       <a class="btn small" href="#/add?date=${s.date}&time=${s.kind === 'day' ? '12:00' : s.after > '18:00' ? s.after : '18:30'}&who=both" aria-label="Plan something for ${prettyDate(s.date, true)}">Plan</a></div>`).join('') || '<div class="empty">No shared free time in the next 3 weeks. Busy you two!</div>'}
   </main>`);
   on($app, '[data-f]', 'click', (e, el) => viewFree(el.dataset.f).catch(fail));
+}
+
+// ---------------------------------------------------------------- search
+function searchCard(e) {
+  const when = e.span > 1 ? `${prettyDate(e.occ_date)} – ${prettyDate(e.end_date)}` : `${prettyDate(e.occ_date)}${e.all_day ? '' : ' · ' + prettyTime(e.start_time)}`;
+  const meta = [when, e.owner_name, e.category.name !== 'Other' ? e.category.name : null, e.location].filter(Boolean).join(' · ');
+  return `<a class="evcard" href="#/event/${e.id}/${e.occ_date}">${avatar(e)}<span class="grow"><span class="t">${esc(e.title)}</span><span class="s">${esc(meta)}</span></span><span style="color:var(--muted)">${I.right}</span></a>`;
+}
+
+function viewSearch() {
+  setScreen(`<main class="screen no-nav">
+    <div class="topbar"><a class="textbtn" href="${esc(S.searchBack || '#/month')}" data-back>${I.left}Back</a></div>
+    <div class="field"><label class="sr" for="q">Search events</label>
+      <div style="position:relative"><span style="position:absolute;left:14px;top:16px;color:var(--sub)">${I.search}</span>
+      <input class="input" id="q" type="search" placeholder="Search events, places, notes" autocomplete="off" enterkeyhint="search" style="padding-left:44px" value="${esc(S.searchQ || '')}"></div></div>
+    <div id="results" style="display:flex;flex-direction:column;gap:16px"></div>
+  </main>`);
+  bindBack();
+  const input = $app.querySelector('#q');
+  const box = $app.querySelector('#results');
+  let timer; let seq = 0;
+  const run = async () => {
+    const q = input.value.trim();
+    S.searchQ = q;
+    if (q.length < 2) { box.innerHTML = `<p class="muted" style="text-align:center;padding:24px 0">Type at least 2 letters — titles, places, notes and categories all count.</p>`; return; }
+    const mine = ++seq;
+    try {
+      const r = await api(`/search?q=${encodeURIComponent(q)}`);
+      if (mine !== seq) return;
+      const section = (label, list) => (list.length ? `<section class="section"><h2 class="h2">${label}</h2>${list.map(searchCard).join('')}</section>` : '');
+      box.innerHTML = section('Upcoming', r.upcoming) + section('Past', r.past) || `<div class="empty">Nothing matches “${esc(q)}”.</div>`;
+    } catch (err) { fail(err); }
+  };
+  input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 250); });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(); input.blur(); } });
+  run();
+  if (!S.searchQ) setTimeout(() => input.focus(), 100);
 }
 
 // ---------------------------------------------------------------- start

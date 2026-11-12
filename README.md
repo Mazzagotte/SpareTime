@@ -6,6 +6,7 @@ One calendar for the two of you. A home-screen web app for iPhone and Android, r
 - "Both of us" events, repeating events, private / busy-only events
 - Push notifications: partner adds/changes, reminders, both-booked, weather alerts, Sunday recap
 - Quick add ("GG league every Thu 6:30"), Free together finder, countdown, reactions, on-my-way
+- Multi-day events (tournaments, trips — up to 31 days), yearly repeats (birthdays, anniversaries), and search
 - U.S. holidays (federal + popular ones, calculated in `public/holidays.js`); choose All / Federal only / Off under Activity → Settings
 
 ## Deploy

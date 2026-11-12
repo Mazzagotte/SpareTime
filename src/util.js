@@ -121,13 +121,18 @@ export function occurrences(ev, from, to) {
     return out;
   }
   if (ev.date > until) return out;
-  if (ev.repeat === 'monthly') {
+  if (ev.repeat === 'monthly' || ev.repeat === 'yearly') {
     const start = parseDate(ev.date);
     const dom = start.getUTCDate();
+    const stepMonths = ev.repeat === 'yearly' ? 12 : 1;
     for (let i = 0; i < 240; i++) {
-      const dt = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i, dom));
-      if (dt.getUTCDate() !== dom) continue; // skip months without that day
-      const d = fmtDate(dt);
+      const dt = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i * stepMonths, dom));
+      let d;
+      if (dt.getUTCDate() !== dom) {
+        // Feb 29 birthdays/anniversaries land on Feb 28 in other years; monthly repeats skip short months.
+        if (ev.repeat !== 'yearly') continue;
+        d = fmtDate(new Date(Date.UTC(start.getUTCFullYear() + i, start.getUTCMonth() + 1, 0)));
+      } else d = fmtDate(dt);
       if (d > until) break;
       push(d);
     }
@@ -140,6 +145,25 @@ export function occurrences(ev, from, to) {
     d = addDays(d, jumps * step);
   }
   for (let i = 0; i < 2000 && d <= until; i++, d = addDays(d, step)) push(d);
+  return out;
+}
+
+// How many extra days a multi-day event covers after its start (0 for single-day events).
+export function spanDays(ev) {
+  return ev.end_date && ev.end_date > ev.date ? daysBetween(ev.date, ev.end_date) : 0;
+}
+
+// Every day an event covers within [from, to]: [{ start, day, index, span }].
+// `start` is that occurrence's first day; `span` is the total number of days.
+export function occurrenceDays(ev, from, to) {
+  const extra = spanDays(ev);
+  const out = [];
+  for (const start of occurrences(ev, extra ? addDays(from, -extra) : from, to)) {
+    for (let i = 0; i <= extra; i++) {
+      const day = i ? addDays(start, i) : start;
+      if (day >= from && day <= to) out.push({ start, day, index: i, span: extra + 1 });
+    }
+  }
   return out;
 }
 
@@ -166,6 +190,7 @@ export function prettyTime(t) {
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return `${h12}:${String(m).padStart(2, '0')} ${ap}`;
 }
-export function whenText(date, time, allDay) {
+export function whenText(date, time, allDay, endDate) {
+  if (endDate && endDate > date) return `${prettyDate(date)} – ${prettyDate(endDate)}`;
   return allDay || !time ? prettyDate(date) : `${prettyDate(date)} at ${prettyTime(time)}`;
 }

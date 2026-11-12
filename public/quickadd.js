@@ -53,7 +53,7 @@ export function parseQuick(text, ctx) {
   const raw = (text || '').trim();
   if (!raw) return null;
   let s = ' ' + raw.toLowerCase().replace(/[,]/g, ' ') + ' ';
-  const out = { title: null, owner: null, category_id: null, date: null, start_time: null, end_time: null, all_day: false, repeat: 'none' };
+  const out = { title: null, owner: null, category_id: null, date: null, end_date: null, start_time: null, end_time: null, all_day: false, repeat: 'none' };
   const used = [];
   const take = (re) => {
     const m = s.match(re);
@@ -63,7 +63,10 @@ export function parseQuick(text, ctx) {
 
   // who
   const partnerName = ctx.partner ? ctx.partner.name.toLowerCase() : null;
-  if (partnerName && new RegExp(`\\b${partnerName}('s)?\\b`).test(s)) { out.owner = 'partner'; take(new RegExp(`\\b${partnerName}('s)?\\b`)); }
+  const names = [ctx.me.name, ctx.partner && ctx.partner.name].filter(Boolean).map((n) => n.toLowerCase());
+  const specialDay = new RegExp(`\\b(${names.join('|')}|my|our)('s)? (birthday|bday|b-day|anniversary)\\b`).test(s);
+  if (specialDay) out.owner = 'both';
+  else if (partnerName && new RegExp(`\\b${partnerName}('s)?\\b`).test(s)) { out.owner = 'partner'; take(new RegExp(`\\b${partnerName}('s)?\\b`)); }
   else if (/\b(we|us|both|our)\b/.test(s)) out.owner = 'both';
 
   // all day
@@ -77,9 +80,34 @@ export function parseQuick(text, ctx) {
   else if (take(/\b(every week|weekly)\b/)) out.repeat = 'weekly';
   else if (take(/\b(every other week|biweekly)\b/)) out.repeat = 'biweekly';
   else if (take(/\b(every month|monthly)\b/)) out.repeat = 'monthly';
+  else if (take(/\b(every year|yearly|annually|annual)\b/)) out.repeat = 'yearly';
 
   // dates
   const evening = /\btonight\b/.test(s);
+  const monthDate = (mon, day) => {
+    const mi = MONTHS.indexOf(mon.slice(0, 3));
+    const y = Number(ctx.today.slice(0, 4));
+    let d = `${y}-${pad(mi + 1)}-${pad(Number(day))}`;
+    if (d < ctx.today) d = `${y + 1}-${pad(mi + 1)}-${pad(Number(day))}`;
+    return d;
+  };
+  const RANGE = '\\s*(?:-|–|to|through|thru)\\s*';
+  if (!out.date) {
+    // Ranges: "nov 20-22", "dec 30 to jan 2", "fri-sun", "this weekend"
+    if ((m = take(new RegExp(`\\b(${MONTHS.join('|')})[a-z]*\\.? (\\d{1,2})(?:st|nd|rd|th)?${RANGE}(?:(${MONTHS.join('|')})[a-z]*\\.? )?(\\d{1,2})(?:st|nd|rd|th)?\\b`)))) {
+      out.date = monthDate(m[1], m[2]);
+      let end = `${out.date.slice(0, 4)}-${pad(MONTHS.indexOf((m[3] || m[1]).slice(0, 3)) + 1)}-${pad(Number(m[4]))}`;
+      if (end <= out.date) end = `${Number(end.slice(0, 4)) + 1}${end.slice(4)}`;
+      out.end_date = end;
+    } else if ((m = take(new RegExp(`\\b${DAY_RE}${RANGE}${DAY_RE}\\b`)))) {
+      out.date = nextDow(ctx.today, dayIndex(m[1]));
+      out.end_date = addDays(out.date, ((dayIndex(m[2]) - dayIndex(m[1]) + 7) % 7) || 7);
+    } else if (take(/\b(this )?weekend\b/)) {
+      out.date = dow(ctx.today) === 0 ? ctx.today : nextDow(ctx.today, 6);
+      out.end_date = dow(ctx.today) === 0 ? null : addDays(out.date, 1);
+      if (!out.end_date) out.all_day = true;
+    }
+  }
   if (!out.date) {
     if (take(/\b(today|tonight)\b/)) out.date = ctx.today;
     else if (take(/\b(tomorrow|tmrw|tmr)\b/)) out.date = addDays(ctx.today, 1);
@@ -117,6 +145,13 @@ export function parseQuick(text, ctx) {
     }
   }
 
+  // Birthdays and anniversaries come around every year and usually last all day.
+  if (/\b(birthday|bday|b-day|anniversary)\b/i.test(raw) && !/\bparty\b/i.test(raw)) {
+    if (out.repeat === 'none') out.repeat = 'yearly';
+    if (!out.start_time) out.all_day = true;
+  }
+  if (out.end_date && !out.start_time) out.all_day = true;
+
   // category + owner from keywords or category names
   const lower = raw.toLowerCase();
   let alias = ALIASES.find((a) => a.re.test(lower));
@@ -152,7 +187,8 @@ export function parseQuick(text, ctx) {
   title = title.replace(/\b(at|on|from|every|each|next|the)\b/gi, ' ').replace(/@/g, ' ').replace(/\s+/g, ' ').trim();
   if (alias && alias.title) {
     const leftover = title.replace(new RegExp(alias.re.source, 'i'), ' ').replace(/\b(league|night)\b/i, ' ').replace(/\s+/g, ' ').trim();
-    title = alias.title(lower) + (leftover && !/^(my|our|her|his|s)$/i.test(leftover) && !alias.who ? ` ${leftover}` : '');
+    if (!leftover || /^(my|our|her|his|s)$/i.test(leftover) || alias.who) title = alias.title(lower);
+    else title = title.replace(/\btourney\b/i, 'tournament').replace(/\bgg\b/i, 'Gutter Gussie');
   }
   title = title.replace(/^(my|our)\s+/i, '').trim();
   out.title = title ? title.charAt(0).toUpperCase() + title.slice(1) : null;

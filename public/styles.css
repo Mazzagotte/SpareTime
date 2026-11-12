@@ -54,7 +54,7 @@ img { display: block; }
 .textbtn.strong { font-weight: 600; }
 
 /* buttons */
-.circle { width: 44px; height: 44px; border-radius: 999px; border: 0; background: var(--surface); box-shadow: var(--shadow); display: inline-flex; align-items: center; justify-content: center; }
+.circle { text-decoration: none; width: 44px; height: 44px; border-radius: 999px; border: 0; background: var(--surface); box-shadow: var(--shadow); display: inline-flex; align-items: center; justify-content: center; }
 .btn { height: 54px; border: 0; border-radius: 999px; background: var(--ink); color: var(--ink-text); font-size: 16px; font-weight: 700; width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; }
 .btn.small { height: 40px; width: auto; padding: 0 14px; font-size: 13px; }
 .btn.ghost { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
@@ -103,12 +103,16 @@ img { display: block; }
 .cal-dow, .cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
 .cal-dow span { text-align: center; font-size: 11px; font-weight: 600; color: var(--sub); padding-bottom: 4px; }
 .cal-grid { row-gap: 2px; }
-.day { height: 64px; min-width: 0; border: 0; background: transparent; padding: 2px; display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
+.day { height: 76px; min-width: 0; border: 0; background: transparent; padding: 2px; display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
+.day { overflow: hidden; }
+.day > * { flex-shrink: 0; }
 .day .n { align-self: center; width: 26px; height: 26px; border-radius: 999px; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 500; }
 .day.out .n { color: var(--muted); }
 .day.today .n { background: var(--blue-bg); color: var(--blue-fg); font-weight: 700; }
 .day.sel .n { background: var(--sel-bg); color: var(--sel-fg); font-weight: 700; }
 .bar { display: block; height: 14px; line-height: 14px; padding: 0 3px; border-radius: 4px; font-size: 10px; font-weight: 600; color: #FFFFFF; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.bar.cont-l { border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: -2px; }
+.bar.cont-r { border-top-right-radius: 0; border-bottom-right-radius: 0; margin-right: -2px; }
 .bar.holiday { background: var(--surface2); color: var(--sub); }
 .holiday-row { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 12px; background: var(--surface2); color: var(--sub); font-size: 13px; }
 .holiday-row b { color: var(--text); font-weight: 700; }

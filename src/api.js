@@ -3,12 +3,13 @@ import { checkOrigin, createSession, currentUser, destroySession, hashPassword, 
 import { PREF_DEFAULTS, claim, getPrefs, notify } from './notify.js';
 import { pushToUser, vapidKeys } from './push.js';
 import {
-  COLOR_RE, DATE_RE, HttpError, TIME_RE, addDays, json, occurrences, prettyDate, readJson,
-  safeJson, str, todayLocal, weekday, whenText,
+  COLOR_RE, DATE_RE, HttpError, TIME_RE, addDays, daysBetween, json, occurrenceDays, occurrences, prettyDate, readJson,
+  safeJson, spanDays, str, todayLocal, weekday, whenText,
 } from './util.js';
 import { forecast, weatherFor } from './weather.js';
 
-const REPEATS = ['none', 'daily', 'weekly', 'biweekly', 'monthly'];
+const REPEATS = ['none', 'daily', 'weekly', 'biweekly', 'monthly', 'yearly'];
+const MAX_SPAN_DAYS = 31;
 const VISIBILITY = ['shared', 'busy', 'private'];
 const REMINDER_WORDS = ['night', 'morning', 'hour'];
 const OTHER = { id: null, name: 'Other', color: '#6B7280' };
@@ -41,23 +42,31 @@ async function categoryMap(env) {
   return new Map(results.map((c) => [c.id, c]));
 }
 
+// One entry per day an event covers: { ev, date (that day), start (occurrence's first day), index, span }.
 async function eventsInRange(env, from, to) {
   const { results } = await env.DB.prepare(
-    "SELECT * FROM events WHERE date <= ? AND (repeat != 'none' OR date >= ?)"
-  ).bind(to, from).all();
+    "SELECT * FROM events WHERE date <= ? AND (repeat != 'none' OR COALESCE(end_date, date) >= ?)"
+  ).bind(to, addDays(from, -MAX_SPAN_DAYS)).all();
   const occ = [];
-  for (const ev of results) for (const d of occurrences(ev, from, to)) occ.push({ ev, date: d });
-  occ.sort((a, b) => (a.date + (a.ev.all_day ? '00' : a.ev.start_time || '99')).localeCompare(b.date + (b.ev.all_day ? '00' : b.ev.start_time || '99')));
+  for (const ev of results) for (const o of occurrenceDays(ev, from, to)) occ.push({ ev, date: o.day, start: o.start, index: o.index, span: o.span });
+  const key = (o) => o.date + String(99 - Math.min(o.span, 99)).padStart(2, '0') + (o.ev.all_day || o.index > 0 ? '00' : o.ev.start_time || '99');
+  occ.sort((a, b) => key(a).localeCompare(key(b)) || a.ev.id - b.ev.id);
   return occ;
 }
 
-function view(ev, date, me, cats, ppl) {
+// o: { start, date, index, span } for a covered day (single-day events: index 0, span 1).
+function view(ev, o, me, cats, ppl) {
+  const date = o.start;
   const owner = ppl.find((p) => p.id === ev.owner_id) || null;
   const cat = ev.category_id ? cats.get(ev.category_id) : null;
   const category = cat && !cat.deleted_at ? { id: cat.id, name: cat.name, color: cat.color } : OTHER;
   const base = {
     id: ev.id,
     occ_date: date,
+    day: o.date,
+    day_index: o.index,
+    span: o.span,
+    end_date: o.span > 1 ? addDays(date, o.span - 1) : null,
     owner_id: ev.owner_id,
     owner_name: owner ? owner.name : 'Both of us',
     start_time: ev.all_day ? null : ev.start_time,
@@ -98,7 +107,11 @@ async function eventInput(env, body, me, ppl) {
   const end = allDay ? null : body.end_time || null;
   if (!allDay && (!start || !TIME_RE.test(start))) throw new HttpError(400, 'Pick a start time');
   if (end && !TIME_RE.test(end)) throw new HttpError(400, 'End time looks off');
+  if (end && start && end <= start && !(body.end_date && body.end_date > body.date)) throw new HttpError(400, 'The end time is before the start');
+  let endDate = body.end_date && DATE_RE.test(body.end_date) && body.end_date > body.date ? body.end_date : null;
+  if (endDate && daysBetween(body.date, endDate) > MAX_SPAN_DAYS - 1) throw new HttpError(400, `Events can last up to ${MAX_SPAN_DAYS} days`);
   const repeat = REPEATS.includes(body.repeat) ? body.repeat : 'none';
+  if (endDate && repeat === 'daily') throw new HttpError(400, "A multi-day event can't repeat every day");
   const until = body.repeat_until && DATE_RE.test(body.repeat_until) ? body.repeat_until : null;
   let ownerId = null;
   if (body.owner_id != null) {
@@ -112,7 +125,7 @@ async function eventInput(env, body, me, ppl) {
   }
   const visibility = ownerId == null ? 'shared' : VISIBILITY.includes(body.visibility) ? body.visibility : 'shared';
   return {
-    owner_id: ownerId, category_id: categoryId, title, date: body.date, start_time: start, end_time: end,
+    owner_id: ownerId, category_id: categoryId, title, date: body.date, end_date: endDate, start_time: start, end_time: end,
     all_day: allDay ? 1 : 0, location: str(body.location, 160), notes: str(body.notes, 2000), repeat,
     repeat_until: repeat === 'none' ? null : until, visibility,
     notify_partner: body.notify_partner === false ? 0 : 1,
@@ -163,11 +176,16 @@ export async function weekSummary(env, from, me, ppl) {
   const counts = Object.fromEntries(ppl.map((p) => [p.id, 0]));
   const perDay = {};
   const ownersByDay = {};
+  const seen = new Set();
   for (const o of occ) {
     if (isHidden(o.ev, me)) continue;
     perDay[o.date] = (perDay[o.date] || 0) + 1;
-    if (o.ev.owner_id == null) ppl.forEach((p) => counts[p.id]++);
-    else counts[o.ev.owner_id] = (counts[o.ev.owner_id] || 0) + 1;
+    const once = `${o.ev.id}:${o.start}`;
+    if (!seen.has(once)) {
+      seen.add(once);
+      if (o.ev.owner_id == null) ppl.forEach((p) => counts[p.id]++);
+      else counts[o.ev.owner_id] = (counts[o.ev.owner_id] || 0) + 1;
+    }
     (ownersByDay[o.date] ||= new Set()).add(o.ev.owner_id == null ? 'both' : o.ev.owner_id);
   }
   const free = await freeTimes(env, from, to, null);
@@ -190,7 +208,15 @@ function fromMin(n) { return `${String(Math.floor(n / 60)).padStart(2, '0')}:${S
 async function freeTimes(env, from, to, wx) {
   const occ = await eventsInRange(env, from, to);
   const byDay = {};
-  for (const o of occ) (byDay[o.date] ||= []).push(o.ev);
+  for (const o of occ) {
+    const ev = o.ev;
+    const last = o.index === o.span - 1;
+    // Middle days of a multi-day event are fully busy; the first runs to midnight, the last from midnight.
+    if (ev.all_day || (o.index > 0 && !last)) (byDay[o.date] ||= []).push({ all_day: 1 });
+    else if (o.span > 1 && o.index === 0) (byDay[o.date] ||= []).push({ start_time: ev.start_time || '00:00', end_time: '23:59' });
+    else if (o.span > 1) (byDay[o.date] ||= []).push({ start_time: '00:00', end_time: ev.end_time || '23:59' });
+    else (byDay[o.date] ||= []).push(ev);
+  }
   const out = [];
   const today = todayLocal(env.TIMEZONE);
   for (let d = from; d <= to; d = addDays(d, 1)) {
@@ -356,16 +382,16 @@ export async function handleApi(request, env, ctx) {
     if (addDays(from, 100) < to) throw new HttpError(400, 'Range too long');
     const cats = await categoryMap(env);
     const occ = await eventsInRange(env, from, to);
-    return json(occ.filter((o) => !isHidden(o.ev, me)).map((o) => view(o.ev, o.date, me, cats, ppl)));
+    return json(occ.filter((o) => !isHidden(o.ev, me)).map((o) => view(o.ev, o, me, cats, ppl)));
   }
 
   if (path === '/events' && method === 'POST') {
     const b = await readJson(request);
     const e = await eventInput(env, b, me, ppl);
     const r = await env.DB.prepare(
-      `INSERT INTO events (owner_id, category_id, title, date, start_time, end_time, all_day, location, notes, repeat, repeat_until, visibility, notify_partner, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(e.owner_id, e.category_id, e.title, e.date, e.start_time, e.end_time, e.all_day, e.location, e.notes,
+      `INSERT INTO events (owner_id, category_id, title, date, end_date, start_time, end_time, all_day, location, notes, repeat, repeat_until, visibility, notify_partner, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(e.owner_id, e.category_id, e.title, e.date, e.end_date, e.start_time, e.end_time, e.all_day, e.location, e.notes,
       e.repeat, e.repeat_until, e.visibility, e.notify_partner, me.id).run();
     const id = r.meta.last_row_id;
     const kinds = cleanKinds(b.reminders || ['night', 'hour']);
@@ -383,12 +409,12 @@ export async function handleApi(request, env, ctx) {
       for (const to of audience(ev, me, ppl)) {
         await notify(env, ctx, {
           to, pref: 'partner_changes', kind: 'added', actorId: me.id, eventId: id, occDate: e.date,
-          lead: `${me.name} added`, body: `${label} · ${whenText(e.date, e.start_time, e.all_day)}${e.repeat !== 'none' ? ` (repeats ${e.repeat})` : ''}`,
+          lead: `${me.name} added`, body: `${label} · ${whenText(e.date, e.start_time, e.all_day, e.end_date)}${e.repeat !== 'none' ? ` (repeats ${e.repeat})` : ''}`,
           url: `/#/event/${id}/${e.date}`,
         });
       }
     }
-    await checkBothBooked(env, ctx, e.date, ppl);
+    for (let i = 0; i <= Math.min(e.end_date ? daysBetween(e.date, e.end_date) : 0, 6); i++) await checkBothBooked(env, ctx, addDays(e.date, i), ppl);
     return json({ id });
   }
 
@@ -399,7 +425,7 @@ export async function handleApi(request, env, ctx) {
     if (method === 'GET') {
       const date = DATE_RE.test(url.searchParams.get('date') || '') ? url.searchParams.get('date') : ev.date;
       const cats = await categoryMap(env);
-      const base = view(ev, date, me, cats, ppl);
+      const base = view(ev, { start: date, date, index: 0, span: spanDays(ev) + 1 }, me, cats, ppl);
       if (base.masked) return json(base);
       const [reactions, statuses, mine, also, wx] = await Promise.all([
         env.DB.prepare('SELECT r.text, r.created_at, r.user_id, u.name FROM reactions r JOIN users u ON u.id = r.user_id WHERE event_id = ? AND occ_date = ? ORDER BY r.id').bind(ev.id, date).all(),
@@ -419,7 +445,8 @@ export async function handleApi(request, env, ctx) {
         partner: partner ? { id: partner.id, name: partner.name } : null,
         reactions: reactions.results,
         statuses: statuses.results,
-        also: also.filter((o) => o.ev.id !== ev.id && !isHidden(o.ev, me)).map((o) => view(o.ev, o.date, me, cats, ppl)),
+        also: also.filter((o) => o.ev.id !== ev.id && !isHidden(o.ev, me)).map((o) => view(o.ev, o, me, cats, ppl)),
+        series_end_date: ev.end_date,
         weather: wx,
         is_today: date === todayLocal(env.TIMEZONE),
       });
@@ -430,21 +457,21 @@ export async function handleApi(request, env, ctx) {
       const b = await readJson(request);
       const e = await eventInput(env, b, me, ppl);
       await env.DB.prepare(
-        `UPDATE events SET owner_id=?, category_id=?, title=?, date=?, start_time=?, end_time=?, all_day=?, location=?, notes=?, repeat=?, repeat_until=?,
+        `UPDATE events SET owner_id=?, category_id=?, title=?, date=?, end_date=?, start_time=?, end_time=?, all_day=?, location=?, notes=?, repeat=?, repeat_until=?,
          visibility=?, notify_partner=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-      ).bind(e.owner_id, e.category_id, e.title, e.date, e.start_time, e.end_time, e.all_day, e.location, e.notes,
+      ).bind(e.owner_id, e.category_id, e.title, e.date, e.end_date, e.start_time, e.end_time, e.all_day, e.location, e.notes,
         e.repeat, e.repeat_until, e.visibility, e.notify_partner, ev.id).run();
       if (Array.isArray(b.reminders)) await setKinds(env, ev.id, me.id, b.reminders);
       if (e.notify_partner && !(e.visibility === 'private' && ev.visibility === 'private')) {
         for (const to of audience(ev, me, ppl)) {
           await notify(env, ctx, {
             to, pref: 'partner_changes', kind: 'changed', actorId: me.id, eventId: ev.id, occDate: e.date,
-            lead: `${me.name} changed`, body: `${e.visibility === 'shared' || e.owner_id == null ? e.title : 'a busy block'} · ${whenText(e.date, e.start_time, e.all_day)}`,
+            lead: `${me.name} changed`, body: `${e.visibility === 'shared' || e.owner_id == null ? e.title : 'a busy block'} · ${whenText(e.date, e.start_time, e.all_day, e.end_date)}`,
             url: `/#/event/${ev.id}/${e.date}`,
           });
         }
       }
-      await checkBothBooked(env, ctx, e.date, ppl);
+      for (let i = 0; i <= Math.min(e.end_date ? daysBetween(e.date, e.end_date) : 0, 6); i++) await checkBothBooked(env, ctx, addDays(e.date, i), ppl);
       return json({ ok: true });
     }
 
@@ -464,7 +491,7 @@ export async function handleApi(request, env, ctx) {
           await notify(env, ctx, {
             to, pref: 'partner_changes', kind: 'removed', actorId: me.id,
             lead: `${me.name} removed`,
-            body: `${ev.visibility === 'shared' || ev.owner_id == null ? ev.title : 'a busy block'} · ${one ? prettyDate(date) : whenText(ev.date, ev.start_time, ev.all_day)}${one ? ' (just that day)' : ''}`,
+            body: `${ev.visibility === 'shared' || ev.owner_id == null ? ev.title : 'a busy block'} · ${one ? prettyDate(date) : whenText(ev.date, ev.start_time, ev.all_day, ev.end_date)}${one ? ' (just that day)' : ''}`,
           });
         }
       }
@@ -580,6 +607,35 @@ export async function handleApi(request, env, ctx) {
   if (path === '/push/test' && method === 'POST') {
     await pushToUser(env, me.id, { title: 'Notifications are on', body: `You'll hear about ${partner ? partner.name + "'s" : 'new'} plans here.`, url: '/#/activity', tag: 'test' });
     return json({ ok: true });
+  }
+
+  // Search titles, places, notes and category names across all visible events.
+  if (path === '/search' && method === 'GET') {
+    const q = (url.searchParams.get('q') || '').trim().slice(0, 60);
+    if (q.length < 2) return json([]);
+    const like = `%${q.replace(/[\\%_]/g, (c) => '\\' + c)}%`;
+    const { results } = await env.DB.prepare(
+      `SELECT e.* FROM events e LEFT JOIN categories c ON c.id = e.category_id AND c.deleted_at IS NULL
+       WHERE e.title LIKE ?1 ESCAPE '\\' OR e.location LIKE ?1 ESCAPE '\\' OR e.notes LIKE ?1 ESCAPE '\\' OR c.name LIKE ?1 ESCAPE '\\'
+       LIMIT 200`
+    ).bind(like).all();
+    const cats = await categoryMap(env);
+    const today = todayLocal(env.TIMEZONE);
+    const hits = [];
+    for (const ev of results) {
+      if (isHidden(ev, me) || !canSeeFully(ev, me)) continue;
+      const span = spanDays(ev) + 1;
+      let start = ev.date;
+      if (ev.repeat !== 'none') {
+        const next = occurrences(ev, addDays(today, -(span - 1)), addDays(today, 800))[0];
+        if (next) start = next;
+        else { const past = occurrences(ev, ev.date, today); start = past[past.length - 1] || ev.date; }
+      }
+      hits.push(view(ev, { start, date: start, index: 0, span }, me, cats, ppl));
+    }
+    const upcoming = hits.filter((h) => (h.end_date || h.occ_date) >= today).sort((x, y) => x.occ_date.localeCompare(y.occ_date));
+    const past = hits.filter((h) => (h.end_date || h.occ_date) < today).sort((x, y) => y.occ_date.localeCompare(x.occ_date));
+    return json({ upcoming: upcoming.slice(0, 40), past: past.slice(0, 40) });
   }
 
   // Free together + weather
