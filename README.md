@@ -21,6 +21,7 @@ Keep the Worker name `sparetime` and set:
 - **Deploy command:** `npx wrangler deploy`
 
 Every push to `main` then migrates the database (only new migrations run) and redeploys on its own.
+If a push doesn't show up under **Deployments → View build history**, check that the Cloudflare Workers and Pages GitHub app has access to this repo.
 
 **From your computer instead:**
 
