@@ -111,8 +111,19 @@ export async function sendPush(env, sub, message) {
     },
     body,
   });
+  let detail = null;
+  if (!res.ok) { try { detail = (await res.text()).slice(0, 300); } catch { /* ignore */ } }
+  await logPush(env, sub, message, res.status, detail);
   if (res.status === 404 || res.status === 410) return 'gone';
   return res.ok ? 'ok' : 'error';
+}
+
+async function logPush(env, sub, message, status, detail) {
+  try {
+    const service = new URL(sub.endpoint).host;
+    await env.DB.prepare('INSERT INTO push_log (user_id, tag, service, status, detail) VALUES (?, ?, ?, ?, ?)')
+      .bind(sub.user_id, message.tag || null, service, status, detail).run();
+  } catch { /* the log is best-effort */ }
 }
 
 // Sends to every device a person has turned notifications on for, and drops dead subscriptions.
@@ -124,6 +135,7 @@ export async function pushToUser(env, userId, message) {
       if (r === 'gone') await env.DB.prepare('DELETE FROM push_subs WHERE id = ?').bind(sub.id).run();
     } catch (e) {
       console.log('push failed', e && e.message);
+      await logPush(env, sub, message, 0, String((e && e.message) || e).slice(0, 300));
     }
   }));
 }

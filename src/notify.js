@@ -28,9 +28,8 @@ export async function notify(env, ctx, { to, pref, kind, actorId = null, eventId
     const prefs = await getPrefs(env, to);
     if (!prefs[pref]) return;
   }
-  const work = pushToUser(env, to, { title: lead.replace(/:$/, ''), body, url, tag: kind + (eventId ? `-${eventId}` : '') });
-  if (ctx && ctx.waitUntil) ctx.waitUntil(work);
-  else await work;
+  // Sent before the request finishes (like the test button), so nothing can cut it off.
+  await pushToUser(env, to, { title: lead.replace(/:$/, ''), body, url, tag: kind + (eventId ? `-${eventId}` : '') });
 }
 
 // Marks a scheduled notification as sent. Returns false if it was already sent.

@@ -136,6 +136,7 @@ export async function runCron(env, ctx, now = Date.now()) {
       env.DB.prepare("DELETE FROM sent WHERE at < datetime('now', '-30 days')"),
       env.DB.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(now),
       env.DB.prepare("DELETE FROM activity WHERE created_at < datetime('now', '-90 days')"),
+      env.DB.prepare("DELETE FROM push_log WHERE created_at < datetime('now', '-30 days')"),
     ]);
   }
   return log;
