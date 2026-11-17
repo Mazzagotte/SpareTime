@@ -107,7 +107,7 @@ export async function sendPush(env, sub, message) {
       'Content-Encoding': 'aes128gcm',
       'Content-Type': 'application/octet-stream',
       TTL: '86400',
-      Urgency: 'normal',
+      Urgency: 'high',
     },
     body,
   });
