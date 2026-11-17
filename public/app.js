@@ -1306,6 +1306,15 @@ async function viewActivity() {
     toast(S.holidays === 'off' ? 'Holidays hidden' : S.holidays === 'federal' ? 'Showing federal holidays' : 'Showing all holidays');
   });
   $app.querySelector('#signout').addEventListener('click', async () => {
+    // Stop this phone from getting this person's notifications once they sign out,
+    // so a phone someone else signs into never keeps pinging the wrong person.
+    try {
+      const sub = await currentSub();
+      if (sub) {
+        await api('/push/unsubscribe', { method: 'POST', body: { endpoint: sub.endpoint } }).catch(() => {});
+        await sub.unsubscribe().catch(() => {});
+      }
+    } catch { /* fine */ }
     await api('/logout', { method: 'POST' }).catch(() => {});
     S.me = null; S.loaded = false; location.hash = '';
     route();
